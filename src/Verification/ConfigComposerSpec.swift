@@ -246,6 +246,55 @@ struct ConfigComposerSpec {
             expectEqual(apiKeys(in: zai ?? [:]), ["zai-key-1"], "managed zai provider should be injected", recorder: recorder)
         }
 
+        run("composeRuntimeConfig preserves user-authored zai models and merges inline plus managed keys", recorder: recorder) {
+            let baseRoot: [String: Any] = [
+                "openai-compatibility": [
+                    [
+                        "name": "zai",
+                        "display-name": "Z.AI",
+                        "base-url": "https://api.z.ai/api/coding/paas/v4",
+                        "api-key-entries": [
+                            ["api-key": "inline-zai"]
+                        ],
+                        "models": [
+                            ["name": "glm-4.7", "alias": "glm-4.7"],
+                            ["name": "glm-5", "alias": "glm-5"],
+                            ["name": "glm-5-turbo", "alias": "glm-5-turbo"]
+                        ]
+                    ]
+                ]
+            ]
+
+            let runtime = ConfigComposer.composeRuntimeConfig(
+                baseRoot: baseRoot,
+                reservedCustomProviderKeys: reservedProviderIDs,
+                disabledCustomProviderIDs: [],
+                disabledOAuthProviderKeys: [],
+                zaiAPIKeys: ["managed-zai", "inline-zai"],
+                customProviderAuthRecords: [],
+                includeManagedZAIProvider: true
+            )
+
+            let zai = provider(named: "zai", in: runtime)
+            expectEqual(
+                apiKeys(in: zai ?? [:]),
+                ["inline-zai", "managed-zai"],
+                "managed zai runtime should deduplicate inline and auth-file API keys",
+                recorder: recorder
+            )
+            expectEqual(
+                modelAliases(in: zai ?? [:]),
+                ["glm-4.7", "glm-5", "glm-5-turbo"],
+                "managed zai runtime should preserve user-authored model aliases",
+                recorder: recorder
+            )
+            expectNil(
+                zai?["display-name"],
+                "managed zai runtime should strip UI metadata before writing merged config",
+                recorder: recorder
+            )
+        }
+
         run("composeRuntimeConfig skips disabled custom providers", recorder: recorder) {
             let baseRoot: [String: Any] = [
                 "openai-compatibility": [
@@ -387,4 +436,10 @@ private func stringArray(_ value: Any?) -> [String] {
 
 private func apiKeys(in provider: [String: Any]) -> [String] {
     ConfigComposer.stringKeyedDictionaryArray(provider["api-key-entries"]).compactMap { $0["api-key"] as? String }
+}
+
+private func modelAliases(in provider: [String: Any]) -> [String] {
+    ConfigComposer.stringKeyedDictionaryArray(provider["models"]).compactMap {
+        ($0["alias"] as? String) ?? ($0["name"] as? String)
+    }
 }

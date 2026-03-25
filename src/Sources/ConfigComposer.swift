@@ -95,11 +95,13 @@ enum ConfigComposer {
         }
         
         var mergedOpenAICompatibility: [[String: Any]] = []
+        var managedZAIBaseEntry: [String: Any]?
         for entry in stringKeyedDictionaryArray(mergedRoot["openai-compatibility"]) {
             guard let providerName = entry["name"] as? String, !providerName.isEmpty else {
                 continue
             }
             if providerName == managedZAIProviderName {
+                managedZAIBaseEntry = entry
                 continue
             }
             
@@ -121,8 +123,14 @@ enum ConfigComposer {
             mergedOpenAICompatibility.append(sanitizedEntry)
         }
         
-        if includeManagedZAIProvider && !zaiAPIKeys.isEmpty {
-            mergedOpenAICompatibility.append(makeZAIProviderEntry(apiKeys: zaiAPIKeys))
+        if includeManagedZAIProvider {
+            let managedZAIEntry = makeZAIProviderEntry(
+                baseEntry: managedZAIBaseEntry,
+                apiKeys: zaiAPIKeys
+            )
+            if !apiKeyEntries(from: managedZAIEntry).isEmpty {
+                mergedOpenAICompatibility.append(managedZAIEntry)
+            }
         }
         
         if mergedOpenAICompatibility.isEmpty {
@@ -285,17 +293,32 @@ enum ConfigComposer {
         return merged.isEmpty ? nil : merged
     }
     
-    private static func makeZAIProviderEntry(apiKeys: [String]) -> [String: Any] {
+    private static func makeZAIProviderEntry(baseEntry: [String: Any]?, apiKeys: [String]) -> [String: Any] {
+        var entry = stripCustomProviderUIMetadata(from: baseEntry ?? [:])
+        entry["name"] = "zai"
+
+        if normalizedString(entry["base-url"]) == nil {
+            entry["base-url"] = "https://api.z.ai/api/coding/paas/v4"
+        }
+
+        let inlineEntries = apiKeyEntries(from: entry)
+        entry["api-key-entries"] = deduplicatedAPIKeyEntries(
+            inlineEntries + apiKeys.map { ["api-key": $0] }
+        )
+
+        if stringKeyedDictionaryArray(entry["models"]).isEmpty {
+            entry["models"] = defaultZAIModels()
+        }
+
+        return entry
+    }
+
+    private static func defaultZAIModels() -> [[String: String]] {
         [
-            "name": "zai",
-            "base-url": "https://api.z.ai/api/coding/paas/v4",
-            "api-key-entries": apiKeys.map { ["api-key": $0] },
-            "models": [
-                ["name": "glm-4.7", "alias": "glm-4.7"],
-                ["name": "glm-4-plus", "alias": "glm-4-plus"],
-                ["name": "glm-4-air", "alias": "glm-4-air"],
-                ["name": "glm-4-flash", "alias": "glm-4-flash"]
-            ]
+            ["name": "glm-4.7", "alias": "glm-4.7"],
+            ["name": "glm-4-plus", "alias": "glm-4-plus"],
+            ["name": "glm-4-air", "alias": "glm-4-air"],
+            ["name": "glm-4-flash", "alias": "glm-4-flash"]
         ]
     }
 }
