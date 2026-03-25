@@ -269,6 +269,8 @@ struct ServiceRow<ExtraContent: View>: View {
 struct CustomProviderCredentialRowView: View {
     let credential: CustomProviderCredential
     let removeColor: Color
+    let showDisableToggle: Bool
+    let isLastEnabled: Bool
     let onToggleDisabled: () -> Void
     let onRemove: () -> Void
     
@@ -286,14 +288,21 @@ struct CustomProviderCredentialRowView: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
-            Button(action: onToggleDisabled) {
-                Text(credential.isDisabled ? "Enable" : "Disable")
-                    .font(.caption)
-                    .foregroundColor(credential.isDisabled ? .green : .orange)
-            }
-            .buttonStyle(.plain)
-            .onHover { inside in
-                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            if showDisableToggle {
+                let canDisable = credential.isDisabled || !isLastEnabled
+                Button(action: onToggleDisabled) {
+                    Text(credential.isDisabled ? "Enable" : "Disable")
+                        .font(.caption)
+                        .foregroundColor(credential.isDisabled ? .green : (canDisable ? .orange : .secondary.opacity(0.4)))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canDisable)
+                .help(!canDisable ? "At least one API key must remain enabled" : "")
+                .onHover { inside in
+                    if canDisable {
+                        if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                    }
+                }
             }
             Button(action: onRemove) {
                 HStack(spacing: 2) {
@@ -334,17 +343,34 @@ struct CustomProviderRow: View {
     private let removeColor = Color(red: 0xeb/255, green: 0x0f/255, blue: 0x0f/255)
     
     private var summaryText: String {
-        var parts: [String] = []
-        if !credentials.isEmpty {
-            parts.append("\(credentials.count) UI key\(credentials.count == 1 ? "" : "s")")
-        }
-        if provider.inlineKeyCount > 0 {
-            parts.append("\(provider.inlineKeyCount) inline key\(provider.inlineKeyCount == 1 ? "" : "s")")
-        }
-        if parts.isEmpty {
+        if totalConfiguredKeyCount == 0 {
             return "No configured API keys"
         }
-        return parts.joined(separator: " • ")
+        if provider.inlineKeyCount > 0 && !credentials.isEmpty {
+            return "\(totalConfiguredKeyCount) API keys • \(provider.inlineKeyCount) in config • \(credentials.count) added here"
+        }
+        if provider.inlineKeyCount > 0 {
+            return "\(totalConfiguredKeyCount) API key\(totalConfiguredKeyCount == 1 ? "" : "s") from config"
+        }
+        return "\(totalConfiguredKeyCount) API key\(totalConfiguredKeyCount == 1 ? "" : "s") added here"
+    }
+
+    private var poolingStatusText: String? {
+        guard totalEnabledKeyCount > 1 else {
+            return nil
+        }
+        return "• Pooled across available keys"
+    }
+
+    private var endpointSummaryText: String {
+        "Endpoint: \(provider.baseURL)"
+    }
+
+    private var modelSummaryText: String? {
+        guard !provider.modelAliases.isEmpty else {
+            return nil
+        }
+        return "Models: \(provider.modelAliases.joined(separator: ", "))"
     }
     
     var body: some View {
@@ -388,8 +414,8 @@ struct CustomProviderRow: View {
                             .font(.caption)
                             .foregroundColor(.green)
                         
-                        if totalEnabledKeyCount > 1 {
-                            Text("• Round-robin w/ auto-failover")
+                        if let poolingStatusText {
+                            Text(poolingStatusText)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -408,8 +434,20 @@ struct CustomProviderRow: View {
                     
                     if isExpanded {
                         VStack(alignment: .leading, spacing: 6) {
+                            Text(endpointSummaryText)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.leading, 28)
+
+                            if let modelSummaryText {
+                                Text(modelSummaryText)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .padding(.leading, 28)
+                            }
+
                             if provider.inlineKeyCount > 0 {
-                                Text("Using \(provider.inlineKeyCount) inline API key\(provider.inlineKeyCount == 1 ? "" : "s") from config")
+                                Text("Using \(provider.inlineKeyCount) API key\(provider.inlineKeyCount == 1 ? "" : "s") from ~/.cli-proxy-api/config.yaml")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                                     .padding(.leading, 28)
@@ -419,6 +457,8 @@ struct CustomProviderRow: View {
                                 CustomProviderCredentialRowView(
                                     credential: credential,
                                     removeColor: removeColor,
+                                    showDisableToggle: totalConfiguredKeyCount > 1,
+                                    isLastEnabled: !credential.isDisabled && totalEnabledKeyCount <= 1,
                                     onToggleDisabled: { onToggleDisabled(credential) },
                                     onRemove: {
                                         credentialToRemove = credential
