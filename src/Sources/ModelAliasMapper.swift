@@ -2,9 +2,9 @@ import Foundation
 
 struct ModelAliasMapper {
     private static let aliases: [String: String] = [
-        "ghcp-c46o": "claude-opus-4.6",
-        "ghcp-c46s": "claude-sonnet-4.6",
-        "ghcp-c45h": "claude-haiku-4.5"
+        "ghcp-op-46": "claude-opus-4.6",
+        "ghcp-son-46": "claude-sonnet-4.6",
+        "ghcp-haik-45": "claude-haiku-4.5"
     ]
 
     static func rewriteModelIfAlias(in jsonString: String) -> (body: String, matchedAlias: Bool) {
@@ -22,7 +22,6 @@ struct ModelAliasMapper {
             return (jsonString, false)
         }
 
-        NSLog("[ModelAliasMapper] Rewrote model alias '\(model)' -> '\(canonicalModel)'")
         return (modifiedString, true)
     }
 }

@@ -3,7 +3,7 @@ import XCTest
 
 final class ModelAliasMapperTests: XCTestCase {
     func testRewriteKnownCopilotAlias_opus() {
-        let input = #"{"model":"ghcp-c46o","messages":[]}"#
+        let input = #"{"model":"ghcp-op-46","messages":[]}"#
         let result = ModelAliasMapper.rewriteModelIfAlias(in: input)
 
         XCTAssertTrue(result.matchedAlias)
@@ -11,7 +11,7 @@ final class ModelAliasMapperTests: XCTestCase {
     }
 
     func testRewriteKnownCopilotAlias_sonnet() {
-        let input = #"{"model":"ghcp-c46s"}"#
+        let input = #"{"model":"ghcp-son-46"}"#
         let result = ModelAliasMapper.rewriteModelIfAlias(in: input)
 
         XCTAssertTrue(result.matchedAlias)
@@ -19,7 +19,7 @@ final class ModelAliasMapperTests: XCTestCase {
     }
 
     func testRewriteKnownCopilotAlias_haiku() {
-        let input = #"{"model":"ghcp-c45h"}"#
+        let input = #"{"model":"ghcp-haik-45"}"#
         let result = ModelAliasMapper.rewriteModelIfAlias(in: input)
 
         XCTAssertTrue(result.matchedAlias)
