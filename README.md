@@ -96,15 +96,45 @@ See [LICENSE](LICENSE) for the full text.
 - macOS 13.0 (Ventura) or later
 - Xcode Command Line Tools / Swift 5.9+ to build from source
 
-## Build from source
+## Installation
+
+### Download pre-built release (recommended)
+
+1. Open **[Releases](https://github.com/geekyshubham/vibeproxy-ultra/releases)**
+2. Download the right build for your Mac:
+
+| Architecture | DMG | ZIP |
+|--------------|-----|-----|
+| **Apple Silicon** (M1/M2/M3/M4) | `VibeProxy-arm64.dmg` | `VibeProxy-arm64.zip` |
+| **Intel** (x86_64) ⚠️ | `VibeProxy-x86_64.dmg` | `VibeProxy-x86_64.zip` |
+
+3. Open the DMG (or extract the ZIP) and drag `VibeProxy.app` to **Applications**
+4. Launch the app
+
+> **Gatekeeper note:** Ultra releases are **ad-hoc signed** (not Apple Developer ID notarized). On first open, use **Right-click → Open → Open**, or remove quarantine with `xattr -cr /Applications/VibeProxy.app`.
+
+Verify checksums (optional):
 
 ```bash
-git clone https://github.com/Geekyshubham/vibeproxy-ultra.git
+shasum -a 256 -c VibeProxy-arm64.zip.sha256
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/geekyshubham/vibeproxy-ultra.git
 cd vibeproxy-ultra
 make app          # creates VibeProxy.app
 make run          # build + launch
 # or
 make install      # install to /Applications
+```
+
+Local multi-arch release packages (same assets as GitHub Releases):
+
+```bash
+APP_VERSION=1.0.0 ./scripts/build-release-artifacts.sh
+# outputs under dist/: VibeProxy-{arm64,x86_64}.{zip,dmg} + .sha256
 ```
 
 See [INSTALLATION.md](INSTALLATION.md) for more detail (paths still refer to the app bundle name `VibeProxy.app`).
