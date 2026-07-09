@@ -583,15 +583,25 @@ struct SettingsView: View {
             Text("VibeProxy Ultra \(appVersion)")
                 .font(.caption.weight(.medium))
                 .foregroundColor(.secondary)
-            Text("© 2026 Geekyshubham · MIT")
+            Text("Unofficial enhanced fork of automazeio/vibeproxy · MIT")
                 .font(.caption2)
-                .foregroundColor(.secondary.opacity(0.8))
-            Link("Report an issue", destination: URL(string: "https://github.com/Geekyshubham/vibeproxy-ultra/issues")!)
-                .font(.caption)
-                .padding(.top, 4)
-                .onHover { inside in
-                    if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                }
+                .foregroundColor(.secondary.opacity(0.85))
+                .multilineTextAlignment(.center)
+            Text("Not affiliated with Automaze · © 2026 Geekyshubham")
+                .font(.caption2)
+                .foregroundColor(.secondary.opacity(0.75))
+            HStack(spacing: 12) {
+                Link("Releases", destination: URL(string: "https://github.com/Geekyshubham/vibeproxy-ultra/releases")!)
+                Link("Issues", destination: URL(string: "https://github.com/Geekyshubham/vibeproxy-ultra/issues")!)
+                Button("About…") { AboutWindowController.show() }
+                    .buttonStyle(.plain)
+                    .foregroundColor(MenuBarDesign.accent)
+            }
+            .font(.caption)
+            .padding(.top, 4)
+            .onHover { inside in
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
         }
         .padding(.bottom, 12)
     }
