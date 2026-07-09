@@ -225,12 +225,16 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
 struct ProviderCostSnapshot: Equatable, Identifiable {
     let id: String
     let providerID: String
+    /// Session ("today") volume in `volumeUnit` (tokens or millicredits for credits).
     let sessionTokens: Int
     let sessionCostUSD: Double?
+    /// Rolling analytics window volume in `volumeUnit` (not necessarily a billing period).
     let last30DaysTokens: Int
     let last30DaysCostUSD: Double?
-    /// Top models by token volume (30-day window).
+    /// Top models by volume (analytics window).
     let models: [ModelTokenUsage]
+    /// Unit for session/last30Days volume fields.
+    let volumeUnit: UsageVolumeUnit
     let updatedAt: Date?
 
     init(
@@ -241,6 +245,7 @@ struct ProviderCostSnapshot: Equatable, Identifiable {
         last30DaysTokens: Int,
         last30DaysCostUSD: Double?,
         models: [ModelTokenUsage] = [],
+        volumeUnit: UsageVolumeUnit = .tokens,
         updatedAt: Date?
     ) {
         self.id = id
@@ -250,6 +255,7 @@ struct ProviderCostSnapshot: Equatable, Identifiable {
         self.last30DaysTokens = last30DaysTokens
         self.last30DaysCostUSD = last30DaysCostUSD
         self.models = models
+        self.volumeUnit = volumeUnit
         self.updatedAt = updatedAt
     }
 }
@@ -406,15 +412,29 @@ enum ChatGPTPlanFormatter {
 
 enum AnalyticsEngine {
     static func overview(from costs: [ProviderCostSnapshot], now: Date = Date()) -> AnalyticsOverview {
-        let totalTokens30d = costs.reduce(0) { $0 + $1.last30DaysTokens }
+        // Only token-like units feed global volume totals (exclude Kiro credits).
+        let tokenLike = costs.filter { $0.volumeUnit.aggregatesAsTokens }
+        let totalTokens30d = tokenLike.reduce(0) { $0 + $1.last30DaysTokens }
         let totalCost30d = costs.reduce(0.0) { $0 + ($1.last30DaysCostUSD ?? 0) }
-        let totalTokensSession = costs.reduce(0) { $0 + $1.sessionTokens }
+        let totalTokensSession = tokenLike.reduce(0) { $0 + $1.sessionTokens }
         let totalCostSession = costs.reduce(0.0) { $0 + ($1.sessionCostUSD ?? 0) }
 
         var modelMerge: [String: (ModelTokenUsage, String)] = [:]
         for cost in costs {
             for model in cost.models {
-                if let existing = modelMerge[model.model] {
+                // Namespace credit/est models so they never merge with real token rows.
+                let mergeKey: String = {
+                    switch model.volumeUnit {
+                    case .tokens: return model.model
+                    case .credits: return "\(cost.providerID):credits:\(model.model)"
+                    case .estimatedTokens: return "\(cost.providerID):est:\(model.model)"
+                    }
+                }()
+                if let existing = modelMerge[mergeKey] {
+                    // Only merge when units match.
+                    guard existing.0.volumeUnit == model.volumeUnit else {
+                        continue
+                    }
                     let merged = ModelTokenUsage(
                         model: model.model,
                         inputTokens: existing.0.inputTokens + model.inputTokens,
@@ -422,18 +442,25 @@ enum AnalyticsEngine {
                         cacheReadTokens: existing.0.cacheReadTokens + model.cacheReadTokens,
                         totalTokens: existing.0.totalTokens + model.totalTokens,
                         estimatedCostUSD: existing.0.estimatedCostUSD + model.estimatedCostUSD,
-                        requestCount: existing.0.requestCount + model.requestCount
+                        requestCount: existing.0.requestCount + model.requestCount,
+                        volumeUnit: model.volumeUnit
                     )
-                    modelMerge[model.model] = (merged, existing.1)
+                    modelMerge[mergeKey] = (merged, existing.1)
                 } else {
-                    modelMerge[model.model] = (model, cost.providerID)
+                    modelMerge[mergeKey] = (model, cost.providerID)
                 }
             }
         }
 
+        // Rank primarily by API-equivalent $ when present; fall back to unit-local volume.
         let topModels = modelMerge.values
             .map(\.0)
-            .sorted { $0.totalTokens > $1.totalTokens }
+            .sorted {
+                if $0.estimatedCostUSD != $1.estimatedCostUSD {
+                    return $0.estimatedCostUSD > $1.estimatedCostUSD
+                }
+                return $0.totalTokens > $1.totalTokens
+            }
             .prefix(12)
             .map { $0 }
 

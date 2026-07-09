@@ -37,8 +37,8 @@ struct AnalyticsDashboardView: View {
                 Text(compact ? "Analytics" : "Usage analytics")
                     .font(compact ? .subheadline.weight(.semibold) : .title3.weight(.semibold))
                 Text(settings.showCostEstimates
-                    ? "Local token logs · estimated API-equivalent $"
-                    : "Local token logs · token volume")
+                    ? "All local CLIs · estimated API-equivalent $"
+                    : "All local CLIs · token / credit volume")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -52,12 +52,12 @@ struct AnalyticsDashboardView: View {
     private func totalsGrid(_ overview: AnalyticsOverview) -> some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
             metricCard(
-                title: "30-day tokens",
+                title: "30-day volume",
                 value: formatTokens(overview.totalTokens30d),
                 subtitle: settings.showCostEstimates ? formatUSD(overview.totalCostUSD30d) : ""
             )
             metricCard(
-                title: "Today tokens",
+                title: "Today volume",
                 value: formatTokens(overview.totalTokensSession),
                 subtitle: settings.showCostEstimates ? formatUSD(overview.totalCostUSDSession) : ""
             )
@@ -88,19 +88,22 @@ struct AnalyticsDashboardView: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             ForEach(overview.byProvider.prefix(compact ? 4 : 12)) { provider in
-                providerRow(provider, totalTokens: max(1, overview.totalTokens30d))
+                providerRow(provider, overview: overview)
             }
         }
     }
 
-    private func providerRow(_ provider: ProviderCostSnapshot, totalTokens: Int) -> some View {
-        let share = Double(provider.last30DaysTokens) / Double(totalTokens)
+    private func providerRow(_ provider: ProviderCostSnapshot, overview: AnalyticsOverview) -> some View {
+        // Share only within the same volume unit (credits never compete with tokens).
+        let peers = overview.byProvider.filter { $0.volumeUnit == provider.volumeUnit }
+        let peerTotal = max(1, peers.reduce(0) { $0 + $1.last30DaysTokens })
+        let share = Double(provider.last30DaysTokens) / Double(peerTotal)
         return VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(provider.providerID.capitalized)
+                Text(displayName(for: provider.providerID))
                     .font(.caption.weight(.semibold))
                 Spacer()
-                Text(formatTokens(provider.last30DaysTokens))
+                Text(formatVolume(provider.last30DaysTokens, unit: provider.volumeUnit))
                     .font(.caption.monospacedDigit())
                 if let usd = provider.last30DaysCostUSD, settings.showCostEstimates {
                     Text(formatUSD(usd))
@@ -132,13 +135,19 @@ struct AnalyticsDashboardView: View {
                         Text(model.model)
                             .font(.caption.weight(.medium))
                             .lineLimit(1)
-                        Text("\(model.requestCount) requests · \(formatTokens(model.inputTokens)) in / \(formatTokens(model.outputTokens)) out")
+                        Text(modelDetailLine(model))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                        if settings.showCostEstimates {
+                            Text(rateLabel(for: model))
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 1) {
-                        Text(formatTokens(model.totalTokens))
+                        Text(formatVolume(model.totalTokens, unit: model.volumeUnit))
                             .font(.caption.monospacedDigit().weight(.semibold))
                         if settings.showCostEstimates {
                             Text(formatUSD(model.estimatedCostUSD))
@@ -154,11 +163,33 @@ struct AnalyticsDashboardView: View {
         .background(GlassCardBackground(tint: Color.purple))
     }
 
+    private func modelDetailLine(_ model: ModelTokenUsage) -> String {
+        switch model.volumeUnit {
+        case .credits:
+            return "\(model.requestCount) req · credits (local sessions)"
+        case .estimatedTokens:
+            return "\(model.requestCount) msg · est. tokens (chars÷4)"
+        case .tokens:
+            return "\(model.requestCount) req · \(formatTokens(model.inputTokens)) in / \(formatTokens(model.outputTokens)) out"
+        }
+    }
+
+    private func rateLabel(for model: ModelTokenUsage) -> String {
+        switch model.volumeUnit {
+        case .credits:
+            return String(format: "credits × $%.2f (API-eq.)", TokenPricingCatalog.kiroUSDPerCredit)
+        case .estimatedTokens:
+            return "est. volume · " + TokenPricingCatalog.rate(forModel: model.model).listPriceLabel
+        case .tokens:
+            return TokenPricingCatalog.rate(forModel: model.model).listPriceLabel
+        }
+    }
+
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("No local usage history yet")
                 .font(.subheadline.weight(.semibold))
-            Text("Use Claude Code, Codex, or other tools — Ultra scans local session logs for tokens, models, and estimated API-equivalent spend.")
+            Text("Use Claude Code, Codex, Grok CLI, Kiro CLI, OpenCode, Copilot, and more — Ultra scans local session logs for tokens, credits, models, and estimated API-equivalent spend.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -169,11 +200,28 @@ struct AnalyticsDashboardView: View {
 
     private var footnote: some View {
         Text(settings.showCostEstimates
-            ? "$ figures are list-price estimates for analytics only — not your subscription invoice. Quota bars above are live plan limits."
-            : "Token volume from local session logs. Quota bars above are live plan limits.")
+            ? "Token totals exclude Kiro credits. Models priced from list rates (CodexBar tables). Kiro analytics = local session credits × $0.04 (API-eq.); quota bar uses `kiro-cli /usage` separately. Not your invoice."
+            : "Token-like volume from CLI logs (Kiro credits listed separately). Kiro quota uses `kiro-cli /usage` (billing period), not the rolling window.")
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func displayName(for providerID: String) -> String {
+        switch providerID.lowercased() {
+        case "codex": return "Codex"
+        case "claude": return "Claude Code"
+        case "gemini": return "Gemini"
+        case "copilot": return "GitHub Copilot"
+        case "antigravity": return "Antigravity"
+        case "kiro": return "Kiro CLI"
+        case "grok": return "Grok CLI"
+        case "opencode": return "OpenCode"
+        case "zai", "z.ai": return "Z.AI"
+        case "kimi": return "Kimi"
+        case "qwen": return "Qwen"
+        default: return providerID.capitalized
+        }
     }
 
     private func formatTokens(_ count: Int) -> String {
@@ -181,6 +229,23 @@ struct AnalyticsDashboardView: View {
         if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000) }
         if count >= 1_000 { return String(format: "%.1fK", Double(count) / 1_000) }
         return "\(count)"
+    }
+
+    /// Formats volume in the provider's unit. Kiro stores millicredits (credits × 1000).
+    private func formatVolume(_ count: Int, unit: UsageVolumeUnit) -> String {
+        switch unit {
+        case .credits:
+            let credits = Double(count) / 1000.0
+            if credits >= 1000 { return String(format: "%.1fK cr", credits / 1000) }
+            if credits >= 10 { return String(format: "%.0f cr", credits) }
+            if credits >= 1 { return String(format: "%.1f cr", credits) }
+            if credits > 0 { return String(format: "%.2f cr", credits) }
+            return "0 cr"
+        case .estimatedTokens:
+            return formatTokens(count) + " est"
+        case .tokens:
+            return formatTokens(count)
+        }
     }
 
     private func formatUSD(_ value: Double) -> String {

@@ -1,12 +1,33 @@
 # Changelog
 
-All notable changes to VibeProxy will be documented in this file.
+All notable changes to VibeProxy Ultra will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-09
+
+VibeProxy Ultra analytics accuracy, Kiro quota ground truth, focus-steal fix, and branding cleanup.
+
+### Fixed
+- **Settings / focus steal** — Auth/config file watchers no longer call `makeKeyAndOrderFront` + `NSApp.activate`. Closed Settings windows are correctly cleared via `windowWillClose` (the previous `windowDidClose` was not a real `NSWindowDelegate` method, so the window stayed retained and could reappear on top of other apps when tokens or `config.yaml` changed).
+- **Kiro analytics** — Rolling 30-day volume comes from local session metering only; billing-period CLI credits no longer overwrite history (including period-reset zeros).
+- **Kiro quota UI** — No invented 10_000 credit pool; percent-only CLI output uses percent display. Percent prefers absolute used/total over unrelated bare `%` text.
+- **Volume units** — Kiro credits no longer mix into global token totals; dashboard labels “volume” and formats credits separately.
+- **Legacy Opus pricing** — Claude 3 / Opus 4 / 4.1 stay at $15/$75; 4.5+ at $5/$25.
+- **Claude scan roots** — Honors `CLAUDE_CONFIG_DIR/projects`.
+
+### Added
+- Specialized local aggregators for Kiro, Grok, OpenCode, and Copilot JB transcripts.
+- `kiro-cli /usage` probe (single-flight cache, soft-failure retention, SIGKILL on timeout).
+- CodexBar-aligned token pricing catalog (cache write rates, richer model matching).
+
+### Changed
+- Product branding is **VibeProxy Ultra** only (settings footer, About, copyright, docs).
+- Version **1.1.0**.
+
 ## [Ultra] - 2026-07-09
 
-VibeProxy Ultra feature release — account, usage, and session-reliability improvements on top of upstream VibeProxy (based on VibeProxy by Automaze, Ltd., MIT).
+VibeProxy Ultra feature release — account, usage, and session-reliability improvements.
 
 ### Added
 - **Current-account detection + one-click switching** - See which account is live in the native tools and switch to another with a single click (Cockpit-style)

@@ -305,7 +305,7 @@ struct ProviderUsageCardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Divider().opacity(0.2)
                 HStack {
-                    Text("Tokens & est. cost")
+                    Text(cost.volumeUnit == .credits ? "Credits & est. cost" : "Tokens & est. cost")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -315,14 +315,14 @@ struct ProviderUsageCardView: View {
                 }
                 HStack(spacing: 12) {
                     if cost.sessionTokens > 0 {
-                        costPill(label: "Today", tokens: cost.sessionTokens, usd: cost.sessionCostUSD)
+                        costPill(label: "Today", volume: cost.sessionTokens, unit: cost.volumeUnit, usd: cost.sessionCostUSD)
                     }
                     if cost.last30DaysTokens > 0 {
-                        costPill(label: "30d", tokens: cost.last30DaysTokens, usd: cost.last30DaysCostUSD)
+                        costPill(label: "30d", volume: cost.last30DaysTokens, unit: cost.volumeUnit, usd: cost.last30DaysCostUSD)
                     }
                 }
                 if let top = cost.models.first {
-                    Text("Top model: \(top.model) · \(formatTokens(top.totalTokens))")
+                    Text("Top model: \(top.model) · \(formatVolume(top.totalTokens, unit: top.volumeUnit))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -332,18 +332,34 @@ struct ProviderUsageCardView: View {
         }
     }
 
-    private func costPill(label: String, tokens: Int, usd: Double?) -> some View {
+    private func costPill(label: String, volume: Int, unit: UsageVolumeUnit, usd: Double?) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
-            Text(formatTokens(tokens))
+            Text(formatVolume(volume, unit: unit))
                 .font(.caption.weight(.semibold).monospacedDigit())
             if let usd, AppSettings.shared.showCostEstimates {
                 Text(formatUSD(usd))
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(tint)
             }
+        }
+    }
+
+    private func formatVolume(_ count: Int, unit: UsageVolumeUnit) -> String {
+        switch unit {
+        case .credits:
+            let credits = Double(count) / 1000.0
+            if credits >= 1000 { return String(format: "%.1fK cr", credits / 1000) }
+            if credits >= 10 { return String(format: "%.0f cr", credits) }
+            if credits >= 1 { return String(format: "%.1f cr", credits) }
+            if credits > 0 { return String(format: "%.2f cr", credits) }
+            return "0 cr"
+        case .estimatedTokens:
+            return formatTokens(count) + " est"
+        case .tokens:
+            return formatTokens(count)
         }
     }
 

@@ -7,7 +7,8 @@ import Combine
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     var statusItem: NSStatusItem!
-    weak var settingsWindow: NSWindow?
+    /// Strong retention while open. Cleared in `windowWillClose` (not the non-existent `windowDidClose`).
+    var settingsWindow: NSWindow?
     var serverManager: ServerManager!
     var thinkingProxy: ThinkingProxy!
     let authManager = AuthManager()
@@ -27,7 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     private var polledConfigInputsFingerprint = ""
     
     override init() {
-        // Unofficial fork: do not auto-start Sparkle against upstream automaze feeds.
+        // Sparkle auto-checks disabled (no feed configured for Ultra).
         self.updaterController = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
         super.init()
     }
@@ -305,7 +306,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         settingsWindow = window
     }
     
-    func windowDidClose(_ notification: Notification) {
+    /// Correct NSWindowDelegate hook — `windowDidClose` is not a real delegate method
+    /// (compiler warns it nearly matches `windowDidExpose`), so closed windows were never
+    /// cleared. Combined with auth/config observers that called `makeKeyAndOrderFront`, that
+    /// made Settings reappear on top of other apps after token/config file churn.
+    func windowWillClose(_ notification: Notification) {
         if notification.object as? NSWindow === settingsWindow {
             settingsWindow = nil
         }
@@ -388,7 +393,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     }
 
     @objc func handleAuthDirectoryChanged() {
-        NSLog("[AppDelegate] Auth directory changed notification received — refreshing settings")
+        // Quiet background refresh only — never orderFront/activate. Token refresh and the
+        // 5s config fingerprint poll rewrite files often; stealing focus here is what made
+        // Settings or the menu-bar chrome jump on top of the user's work intermittently.
+        NSLog("[AppDelegate] Auth/config inputs changed — refreshing in background")
         serverManager.handleObservedConfigInputsChanged()
         authManager.checkAuthStatus()
         nativeSession.refresh(accounts: authManager.serviceAccounts.mapValues { $0.accounts })
@@ -397,10 +405,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 from: ServiceType.allCases,
                 accounts: authManager.serviceAccounts.mapValues { $0.accounts }
             )
-        }
-        if let window = settingsWindow {
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
@@ -430,7 +434,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         content.sound = .default
         
         let request = UNNotificationRequest(
-            identifier: "io.automaze.vibeproxy.\(UUID().uuidString)",
+            identifier: "com.vibeproxy.ultra.\(UUID().uuidString)",
             content: content,
             trigger: nil
         )

@@ -113,10 +113,9 @@ echo -e "${BLUE}Setting version to: ${VERSION} (build ${BUILD_NUMBER})${NC}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "$APP_DIR/Contents/Info.plist"
 
-# Sparkle auto-updates are disabled for this unofficial VibeProxy Ultra fork.
-# Do not point SUFeedURL at automazeio/vibeproxy appcast feeds.
+# Sparkle auto-checks disabled for VibeProxy Ultra (empty feed).
 TARGET_ARCH="${TARGET_ARCH:-arm64}"
-echo -e "${YELLOW}Sparkle auto-update checks disabled (unofficial fork)${NC}"
+echo -e "${YELLOW}Sparkle auto-update checks disabled${NC}"
 /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Set :SUAutomaticallyUpdate false" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
 

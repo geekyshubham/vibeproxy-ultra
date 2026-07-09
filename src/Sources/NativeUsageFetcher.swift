@@ -1257,12 +1257,67 @@ enum NativeUsageFetcher {
         providerID: String,
         payload: [String: Any]
     ) async -> ProviderUsageSnapshot {
+        let email = stringValue(payload, keys: ["email"])
+
+        // CodexBar ground truth: `kiro-cli chat --no-interactive /usage`
+        // e.g. Free "(0.00 of 50 covered…)", Pro 1000, Power 10000 — never invent a pool size.
+        // AWS GetUsageLimits can report ~0 while CLI shows real plan credits.
+        if let cli = await Task.detached(priority: .userInitiated, operation: {
+            KiroCLIUsageProbe.fetch()
+        }).value {
+            let usedPercent = clampPercent(cli.creditsPercent)
+            let window: RateWindow
+            if cli.hasAbsoluteCredits {
+                let total = cli.creditsTotal
+                let used = min(total, max(0, cli.creditsUsed))
+                let remaining = max(0, total - used)
+                window = RateWindow(
+                    usedPercent: usedPercent > 0
+                        ? usedPercent
+                        : clampPercent(total > 0 ? used / total * 100 : 0),
+                    windowMinutes: 43_200,
+                    resetsAt: cli.resetsAt,
+                    resetDescription: cli.resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
+                    label: cli.planName.map { "\($0) credits" } ?? "Credits",
+                    remainingValue: remaining,
+                    totalValue: total,
+                    unitLabel: "credits",
+                    displayStyle: .creditsRemaining
+                )
+            } else {
+                // Percent-only: show % used/left — do not invent remaining/total (50 vs 1000 vs 10000).
+                window = RateWindow(
+                    usedPercent: usedPercent,
+                    windowMinutes: 43_200,
+                    resetsAt: cli.resetsAt,
+                    resetDescription: cli.resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
+                    label: cli.planName.map { "\($0) credits" } ?? "Credits",
+                    remainingValue: nil,
+                    totalValue: nil,
+                    unitLabel: "credits",
+                    displayStyle: .percent
+                )
+            }
+            return ProviderUsageSnapshot(
+                id: authAccountID,
+                providerID: providerID,
+                source: cli.source,
+                windows: [window],
+                accountEmail: email,
+                planType: cli.planName,
+                planLabel: cli.planName,
+                updatedAt: Date(),
+                errorMessage: nil,
+                isRefreshing: false
+            )
+        }
+
+        // Fallback: GetUsageLimits (often wrong for org/power) + light local metering blend.
         guard let accessToken = stringValue(payload, keys: ["access_token"]) else {
-            return .empty(authAccountID: authAccountID, providerID: providerID, error: "Missing access token")
+            return .empty(authAccountID: authAccountID, providerID: providerID, error: "Missing access token (and kiro-cli /usage unavailable)")
         }
 
         let region = stringValue(payload, keys: ["region"]) ?? "us-east-1"
-        let email = stringValue(payload, keys: ["email"])
         guard let url = URL(string: "https://codewhisperer.\(region).amazonaws.com/getUsageLimits") else {
             return .empty(authAccountID: authAccountID, providerID: providerID, error: "Invalid usage URL")
         }
@@ -1298,13 +1353,17 @@ enum NativeUsageFetcher {
             let breakdown = json["usageBreakdownList"] as? [[String: Any]] ?? []
             let credit = breakdown.first { stringValue($0, keys: ["resourceType"]) == "CREDIT" }
                 ?? breakdown.first
-            let primary = mapKiroUsageBreakdown(credit, fallbackReset: json["nextDateReset"], label: "Credits")
+            let primary = mapKiroUsageBreakdownAPI(
+                credit,
+                fallbackReset: json["nextDateReset"],
+                label: "Credits"
+            )
             let windows = [primary].compactMap { $0 }
 
             return ProviderUsageSnapshot(
                 id: authAccountID,
                 providerID: providerID,
-                source: "Kiro OAuth",
+                source: "Kiro GetUsageLimits",
                 windows: windows,
                 accountEmail: email,
                 updatedAt: Date(),
@@ -1316,34 +1375,33 @@ enum NativeUsageFetcher {
         }
     }
 
-    private static func mapKiroUsageBreakdown(
+    /// API-only fallback when kiro-cli is missing. Prefer overageCap pool (product UI / kiro-cli).
+    private static func mapKiroUsageBreakdownAPI(
         _ breakdown: [String: Any]?,
         fallbackReset: Any?,
         label: String
     ) -> RateWindow? {
         guard let breakdown else { return nil }
 
-        // Free included pool (often 50 on KIRO FREE).
         let freeUsed = doubleValue(breakdown, keys: ["currentUsageWithPrecision", "currentUsage"]) ?? 0
         let freeLimit = doubleValue(breakdown, keys: ["usageLimitWithPrecision", "usageLimit"]) ?? 0
-        // Product credit budget kiro-cli shows (often 10_000) — not the free usageLimit.
         let overageCap = doubleValue(breakdown, keys: ["overageCapWithPrecision", "overageCap"]) ?? 0
         let overageUsed = doubleValue(breakdown, keys: ["currentOveragesWithPrecision", "currentOverages"]) ?? 0
 
-        // Total credits = max(included free limit, overage/prepaid cap). Free tier returns
-        // usageLimit=50 and overageCap=10000; kiro-cli / product UI reports the 10_000 pool.
         let total = max(freeLimit, overageCap)
         guard total > 0 else { return nil }
-
-        let used = freeUsed + overageUsed
-        let remaining = max(0, total - used)
-        let usedPercent = clampPercent(used / total * 100)
 
         let resetEpoch = doubleValue(breakdown, keys: ["nextDateReset"])
             ?? (fallbackReset as? Double)
             ?? (fallbackReset as? Int).map(Double.init)
             ?? (fallbackReset as? NSNumber).map { $0.doubleValue }
-        let resetsAt = resetEpoch.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        let resetsAt = resetEpoch.map { epoch in
+            Date(timeIntervalSince1970: TimeInterval(epoch > 1_000_000_000_000 ? epoch / 1000 : epoch))
+        }
+
+        let used = min(total, freeUsed + overageUsed)
+        let remaining = max(0, total - used)
+        let usedPercent = clampPercent(used / total * 100)
 
         return RateWindow(
             usedPercent: usedPercent,

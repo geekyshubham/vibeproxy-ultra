@@ -577,6 +577,25 @@ struct SettingsView: View {
         return ""
     }
 
+    @ViewBuilder
+    private var settingsFooter: some View {
+        VStack(spacing: 4) {
+            Text("VibeProxy Ultra \(appVersion)")
+                .font(.caption.weight(.medium))
+                .foregroundColor(.secondary)
+            Text("© 2026 Geekyshubham · MIT")
+                .font(.caption2)
+                .foregroundColor(.secondary.opacity(0.8))
+            Link("Report an issue", destination: URL(string: "https://github.com/Geekyshubham/vibeproxy-ultra/issues")!)
+                .font(.caption)
+                .padding(.top, 4)
+                .onHover { inside in
+                    if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
+        }
+        .padding(.bottom, 12)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Picker("", selection: $settingsPane) {
@@ -603,7 +622,47 @@ struct SettingsView: View {
                             Task { await usageStore.refreshStatus() }
                         }
                 case .providers:
-                Form {
+                    providersForm
+                }
+            } // ScrollView
+
+            Spacer()
+                .frame(height: 6)
+
+            settingsFooter
+        }
+        .frame(minWidth: 480, idealWidth: 520, minHeight: 520)
+        .sheet(isPresented: $showingQwenEmailPrompt) {
+            qwenEmailSheet
+        }
+        .sheet(isPresented: $showingZaiApiKeyPrompt) {
+            zaiApiKeySheet
+        }
+        .sheet(item: $selectedCustomProvider, onDismiss: {
+            customProviderApiKey = ""
+        }) { provider in
+            customProviderKeySheet(provider)
+        }
+        .onAppear {
+            authManager.checkAuthStatus()
+            serverManager.reloadCustomProviders()
+            checkLaunchAtLogin()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .authDirectoryChanged)) { _ in
+            authManager.checkAuthStatus()
+        }
+        .alert("Authentication Result", isPresented: $showingAuthResult) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(authResultMessage)
+        }
+    }
+
+    // MARK: - Providers form (extracted so the type-checker can finish)
+
+    @ViewBuilder
+    private var providersForm: some View {
+        Form {
                 Section {
                     HStack {
                         Text("Server status")
@@ -985,153 +1044,94 @@ struct SettingsView: View {
                         }
                     }
                 }
-                }
-                .formStyle(.grouped)
-                .padding(.bottom, 8)
-                } // switch settingsPane
-            } // ScrollView
+        }
+        .formStyle(.grouped)
+        .padding(.bottom, 8)
+    }
 
-            Spacer()
-                .frame(height: 6)
+    @ViewBuilder
+    private var qwenEmailSheet: some View {
+        VStack(spacing: 16) {
+            Text("Qwen Account Email")
+                .font(.headline)
+            Text("Enter your Qwen account email address")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            TextField("your.email@example.com", text: $qwenEmail)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 250)
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    showingQwenEmailPrompt = false
+                    qwenEmail = ""
+                }
+                Button("Continue") {
+                    showingQwenEmailPrompt = false
+                    startQwenAuth(email: qwenEmail)
+                }
+                .disabled(qwenEmail.isEmpty)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 350)
+    }
 
-            // Footer
-            VStack(spacing: 4) {
-                HStack(spacing: 4) {
-                    Text("VibeProxy Ultra \(appVersion) — unofficial fork, built on")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Link("CLIProxyAPIPlus", destination: URL(string: "https://github.com/router-for-me/CLIProxyAPIPlus")!)
-                        .font(.caption)
-                        .underline()
-                        .foregroundColor(.secondary)
-                        .onHover { inside in
-                            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                        }
-                    Text("| MIT")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+    @ViewBuilder
+    private var zaiApiKeySheet: some View {
+        VStack(spacing: 16) {
+            Text("Z.AI API Key")
+                .font(.headline)
+            Text("Enter your Z.AI API key from https://z.ai/manage-apikey/apikey-list")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            SecureField("", text: $zaiApiKey)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 300)
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    showingZaiApiKeyPrompt = false
+                    zaiApiKey = ""
                 }
+                Button("Add Key") {
+                    showingZaiApiKeyPrompt = false
+                    startZaiAuth(apiKey: zaiApiKey)
+                }
+                .disabled(zaiApiKey.isEmpty)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 400)
+    }
 
-                HStack(spacing: 4) {
-                    Text("Based on")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Link("VibeProxy", destination: URL(string: "https://github.com/automazeio/vibeproxy")!)
-                        .font(.caption)
-                        .underline()
-                        .foregroundColor(.secondary)
-                        .onHover { inside in
-                            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                        }
-                    Text("by Automaze · Ultra © 2026 Geekyshubham")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+    @ViewBuilder
+    private func customProviderKeySheet(_ provider: CustomProviderDefinition) -> some View {
+        VStack(spacing: 16) {
+            Text("\(provider.title) API Key")
+                .font(.headline)
+            Text("Enter an API key for \(provider.title)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            SecureField("", text: $customProviderApiKey)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 320)
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    selectedCustomProvider = nil
+                    customProviderApiKey = ""
                 }
-
-                Link("Report an issue", destination: URL(string: "https://github.com/Geekyshubham/vibeproxy-ultra/issues")!)
-                    .font(.caption)
-                    .padding(.top, 6)
-                    .onHover { inside in
-                        if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                    }
-            }
-            .padding(.bottom, 12)
-        }
-        .frame(minWidth: 480, idealWidth: 520, minHeight: 520)
-        .sheet(isPresented: $showingQwenEmailPrompt) {
-            VStack(spacing: 16) {
-                Text("Qwen Account Email")
-                    .font(.headline)
-                Text("Enter your Qwen account email address")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                TextField("your.email@example.com", text: $qwenEmail)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 250)
-                HStack(spacing: 12) {
-                    Button("Cancel") {
-                        showingQwenEmailPrompt = false
-                        qwenEmail = ""
-                    }
-                    Button("Continue") {
-                        showingQwenEmailPrompt = false
-                        startQwenAuth(email: qwenEmail)
-                    }
-                    .disabled(qwenEmail.isEmpty)
-                    .keyboardShortcut(.defaultAction)
+                Button("Add Key") {
+                    let currentProvider = provider
+                    selectedCustomProvider = nil
+                    startCustomProviderAuth(provider: currentProvider, apiKey: customProviderApiKey)
                 }
+                .disabled(customProviderApiKey.isEmpty)
+                .keyboardShortcut(.defaultAction)
             }
-            .padding(24)
-            .frame(width: 350)
         }
-        .sheet(isPresented: $showingZaiApiKeyPrompt) {
-            VStack(spacing: 16) {
-                Text("Z.AI API Key")
-                    .font(.headline)
-                Text("Enter your Z.AI API key from https://z.ai/manage-apikey/apikey-list")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                SecureField("", text: $zaiApiKey)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 300)
-                HStack(spacing: 12) {
-                    Button("Cancel") {
-                        showingZaiApiKeyPrompt = false
-                        zaiApiKey = ""
-                    }
-                    Button("Add Key") {
-                        showingZaiApiKeyPrompt = false
-                        startZaiAuth(apiKey: zaiApiKey)
-                    }
-                    .disabled(zaiApiKey.isEmpty)
-                    .keyboardShortcut(.defaultAction)
-                }
-            }
-            .padding(24)
-            .frame(width: 400)
-        }
-        .sheet(item: $selectedCustomProvider, onDismiss: {
-            customProviderApiKey = ""
-        }) { provider in
-            VStack(spacing: 16) {
-                Text("\(provider.title) API Key")
-                    .font(.headline)
-                Text("Enter an API key for \(provider.title)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                SecureField("", text: $customProviderApiKey)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 320)
-                HStack(spacing: 12) {
-                    Button("Cancel") {
-                        selectedCustomProvider = nil
-                        customProviderApiKey = ""
-                    }
-                    Button("Add Key") {
-                        let currentProvider = provider
-                        selectedCustomProvider = nil
-                        startCustomProviderAuth(provider: currentProvider, apiKey: customProviderApiKey)
-                    }
-                    .disabled(customProviderApiKey.isEmpty)
-                    .keyboardShortcut(.defaultAction)
-                }
-            }
-            .padding(24)
-            .frame(width: 420)
-        }
-        .onAppear {
-            authManager.checkAuthStatus()
-            serverManager.reloadCustomProviders()
-            checkLaunchAtLogin()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .authDirectoryChanged)) { _ in
-            authManager.checkAuthStatus()
-        }
-        .alert("Authentication Result", isPresented: $showingAuthResult) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(authResultMessage)
-        }
+        .padding(24)
+        .frame(width: 420)
     }
 
     // MARK: - Preferences pane

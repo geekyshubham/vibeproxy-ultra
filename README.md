@@ -6,18 +6,16 @@
 
 <p align="center">
 <a href="https://github.com/Geekyshubham/vibeproxy-ultra/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-28a745"></a>
-<a href="https://github.com/automazeio/vibeproxy"><img alt="Based on VibeProxy" src="https://img.shields.io/badge/Based%20on-automazeio%2Fvibeproxy-4b3baf"></a>
-<a href="https://github.com/Geekyshubham/vibeproxy-ultra"><img alt="Unofficial fork" src="https://img.shields.io/badge/Status-Unofficial%20fork-orange"></a>
+<a href="https://github.com/Geekyshubham/vibeproxy-ultra"><img alt="VibeProxy Ultra" src="https://img.shields.io/badge/Product-VibeProxy%20Ultra-6c5ce7"></a>
 </p>
 
-**VibeProxy Ultra** is an **unofficial enhanced fork** of [VibeProxy](https://github.com/automazeio/vibeproxy) by Automaze, Ltd.
+**VibeProxy Ultra** is a native macOS menu bar app for routing AI coding tools through your existing subscriptions.
 
-> **Not affiliated with Automaze, OpenAI, Anthropic, Google, xAI, or any AI provider.**  
-> Original project: [automazeio/vibeproxy](https://github.com/automazeio/vibeproxy) · Original license: **MIT**
+> **Not affiliated with OpenAI, Anthropic, Google, xAI, GitHub, or any AI provider.** · License: **MIT** · © 2026 Geekyshubham
 
 Use your existing Claude Code, ChatGPT/Codex, Gemini, Antigravity, GitHub Copilot, Z.AI GLM, Grok, Kimi, Qwen, OpenCode Go, and related subscriptions with local AI coding tools — **no separate API keys required** for OAuth-based providers.
 
-Built on [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) for OAuth, token management, and API routing.
+OAuth, token management, and API routing use a bundled local proxy engine.
 
 <p align="center">
   <img src="docs/screenshot-usage.png" width="720" alt="VibeProxy Ultra usage panel preview">
@@ -49,24 +47,13 @@ Ultra keeps the native macOS menu bar experience and adds production-oriented ac
 | **Menu bar badge** | Optional menu-bar badge showing peak quota % |
 | **Performance** | Faster local log scanning: per-file mtime cache (unchanged files aren't re-parsed), coalesced timers (`Timer.tolerance`), configurable intervals, and a trimmed scan list |
 
-Core VibeProxy capabilities remain: one-click server start/stop, multi-account round-robin, provider enable/disable, Vercel AI Gateway option for Claude, and a self-contained `.app` bundle.
+Also includes: one-click server start/stop, multi-account round-robin, provider enable/disable, Vercel AI Gateway option for Claude, and a self-contained `.app` bundle.
 
 ---
 
-## Attribution & license
+## License
 
-```text
-Based on VibeProxy by Automaze, Ltd., licensed under MIT.
-VibeProxy Ultra is an unofficial fork / enhanced version.
-Original: https://github.com/automazeio/vibeproxy
-```
-
-- Keep the original **MIT** `LICENSE` (Automaze copyright preserved).
-- Ultra modifications: **Copyright (c) 2026 Geekyshubham / Shubh**.
-- You may use, modify, publish, and distribute under MIT; **do not** remove the original copyright notice.
-- Code license ≠ trademarks: do not imply this is the official Automaze product.
-
-See [LICENSE](LICENSE) for the full text.
+**Copyright (c) 2026 Geekyshubham / VibeProxy Ultra** — MIT. See [LICENSE](LICENSE).
 
 ---
 
@@ -75,10 +62,10 @@ See [LICENSE](LICENSE) for the full text.
 | Risk | Notes |
 |------|--------|
 | **Provider ToS** | Proxying Claude / ChatGPT / Gemini / other subscriptions may violate a provider’s terms depending on use. Use at your own risk. |
-| **Branding** | This is **VibeProxy Ultra**, not official VibeProxy. |
+| **Branding** | Product name is **VibeProxy Ultra** (Geekyshubham). |
 | **Secrets** | Never commit OAuth tokens, API keys, or credentials. Auth files live under `~/.cli-proxy-api/` on your machine only. |
-| **Dependencies** | Bundled `cli-proxy-api-plus` and third-party libs may have their own licenses — verify before redistribution. |
-| **Auto-updates** | Sparkle checks against automazeio feeds are **disabled** in this fork so upstream releases do not overwrite Ultra. |
+| **Dependencies** | Bundled proxy binary and third-party libs may have their own licenses — verify before redistribution. |
+| **Auto-updates** | Sparkle auto-checks are disabled; install releases from this repo manually. |
 
 ---
 
@@ -166,40 +153,40 @@ Replace any `automazeio/vibeproxy` download links with this Ultra repo when inst
 
 ```text
 vibeproxy-ultra/
-├── LICENSE                 # MIT (Automaze + Ultra copyright)
+├── LICENSE                 # MIT · © 2026 Geekyshubham
 ├── README.md
 ├── Makefile / create-app-bundle.sh
+├── scripts/                # multi-arch release packaging
 ├── src/
 │   ├── Package.swift
 │   ├── Info.plist
 │   ├── Sources/            # SwiftUI app + usage/import/refresh services
-│   │   └── Resources/      # cli-proxy-api-plus, config.yaml, icons
+│   │   └── Resources/      # proxy binary, config.yaml, icons
 │   └── Tests/
-└── icon.png                # Ultra app icon
+└── icon.png
 ```
 
-Notable Ultra sources:
+Notable sources:
 
 - `NativeUsageFetcher.swift` / `UsageStore.swift` / `ProviderUsageCardView.swift` — usage limits UI
 - `ConfiguredAccountDiscovery.swift` / `ConfiguredAccountImporter.swift` — local account import
 - `TokenRefreshService.swift` / `QuotaWakeService.swift` — session reliability
-- `MenuBarPanelView.swift` / `MenuBarPopoverController.swift` — enhanced menu bar
+- `MenuBarPanelView.swift` / `MenuBarPopoverController.swift` — menu bar
+- `LocalUsageAggregators.swift` / `KiroCLIUsageProbe.swift` — Kiro/Grok/OpenCode/Copilot analytics
 
 ---
 
 ## Credits
 
-- **Original VibeProxy**: [Automaze, Ltd.](https://automaze.io) — [automazeio/vibeproxy](https://github.com/automazeio/vibeproxy)
-- **Proxy engine**: [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) / related CLIProxy ecosystem
-- **Ultra fork**: Geekyshubham
+- **VibeProxy Ultra**: Geekyshubham
+- **Local proxy engine**: open-source CLIProxy ecosystem
 
 ## Support
 
-- **Issues (Ultra)**: [Geekyshubham/vibeproxy-ultra](https://github.com/Geekyshubham/vibeproxy-ultra/issues)
-- **Upstream project**: [automazeio/vibeproxy](https://github.com/automazeio/vibeproxy)
+- **Issues**: [Geekyshubham/vibeproxy-ultra](https://github.com/Geekyshubham/vibeproxy-ultra/issues)
+- **Releases**: [GitHub Releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)
 
 ---
 
-© 2025 Automaze, Ltd. (original VibeProxy)  
-© 2026 Geekyshubham (VibeProxy Ultra modifications)  
+© 2026 Geekyshubham · VibeProxy Ultra  
 MIT License — see [LICENSE](LICENSE).

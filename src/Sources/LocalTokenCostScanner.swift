@@ -1,14 +1,55 @@
 import Foundation
 
+/// Billing/volume unit for analytics rows. Token-like units may be summed together;
+/// credit units stay separate so Kiro millicredits never inflate "token" totals.
+enum UsageVolumeUnit: String, Equatable {
+    /// Real token counts from CLI session logs.
+    case tokens
+    /// Kiro plan credits stored as millicredits (credits × 1000) for sub-credit precision.
+    case credits
+    /// Rough char/4 (or similar) estimates — still token-like for aggregation.
+    case estimatedTokens
+
+    /// Whether this unit may contribute to global token volume totals.
+    var aggregatesAsTokens: Bool {
+        switch self {
+        case .tokens, .estimatedTokens: return true
+        case .credits: return false
+        }
+    }
+}
+
 struct ModelTokenUsage: Equatable, Identifiable {
     var id: String { model }
     let model: String
     let inputTokens: Int
     let outputTokens: Int
     let cacheReadTokens: Int
+    /// Volume in `volumeUnit` (tokens, millicredits, or estimated tokens).
     let totalTokens: Int
     let estimatedCostUSD: Double
     let requestCount: Int
+    let volumeUnit: UsageVolumeUnit
+
+    init(
+        model: String,
+        inputTokens: Int,
+        outputTokens: Int,
+        cacheReadTokens: Int,
+        totalTokens: Int,
+        estimatedCostUSD: Double,
+        requestCount: Int,
+        volumeUnit: UsageVolumeUnit = .tokens
+    ) {
+        self.model = model
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.totalTokens = totalTokens
+        self.estimatedCostUSD = estimatedCostUSD
+        self.requestCount = requestCount
+        self.volumeUnit = volumeUnit
+    }
 }
 
 extension ProviderCostSnapshot {
@@ -19,6 +60,7 @@ extension ProviderCostSnapshot {
         last30DaysTokens: Int,
         last30DaysCostUSD: Double?,
         models: [ModelTokenUsage] = [],
+        volumeUnit: UsageVolumeUnit = .tokens,
         updatedAt: Date? = Date()
     ) -> ProviderCostSnapshot {
         ProviderCostSnapshot(
@@ -29,6 +71,7 @@ extension ProviderCostSnapshot {
             last30DaysTokens: last30DaysTokens,
             last30DaysCostUSD: last30DaysCostUSD,
             models: models,
+            volumeUnit: volumeUnit,
             updatedAt: updatedAt
         )
     }
@@ -78,11 +121,32 @@ enum LocalTokenCostScanner {
 
     /// All providers with local logs we know how to scan.
     static func allProviderSnapshots(now: Date = Date(), historyDays: Int = 30) -> [ProviderCostSnapshot] {
-        // Only providers whose local log formats we actually understand. Adding the
-        // rest just wasted CPU walking empty/foreign trees and risked double counts.
-        let types: [ServiceType] = [.codex, .claude, .gemini, .copilot, .antigravity]
-        return types.compactMap { snapshot(for: $0, now: now, historyDays: historyDays) }
+        var results: [ProviderCostSnapshot] = []
+
+        // Classic CLI jsonl trees
+        let jsonlTypes: [ServiceType] = [.codex, .claude, .gemini, .antigravity]
+        results.append(contentsOf: jsonlTypes.compactMap { snapshot(for: $0, now: now, historyDays: historyDays) })
+
+        // Specialized aggregators (Kiro session JSON, Grok signals, OpenCode SQLite, Copilot JB logs)
+        if let kiro = LocalKiroCredits.costSnapshot(now: now, historyDays: historyDays) {
+            results.append(kiro)
+        }
+        if let grok = LocalGrokUsage.costSnapshot(now: now, historyDays: historyDays) {
+            results.append(grok)
+        }
+        if let opencode = LocalOpenCodeUsage.costSnapshot(now: now, historyDays: historyDays) {
+            results.append(opencode)
+        }
+        // Prefer specialized Copilot estimate when present; else fall back to generic tree scan.
+        if let copilot = LocalCopilotUsage.costSnapshot(now: now, historyDays: historyDays) {
+            results.append(copilot)
+        } else if let copilot = snapshot(for: .copilot, now: now, historyDays: historyDays) {
+            results.append(copilot)
+        }
+
+        return results
     }
+
 
     // MARK: - Roots
 
@@ -95,9 +159,28 @@ enum LocalTokenCostScanner {
                 home.appendingPathComponent(".codex/archived_sessions"),
             ])
         case .claude:
-            return ScanRoots(providerID: "claude", directories: [
+            // Claude Code docs: CLAUDE_CONFIG_DIR relocates ~/.claude (including projects/).
+            // Also scan legacy defaults and de-dupe resolved paths.
+            var claudeDirs: [URL] = [
                 home.appendingPathComponent(".claude/projects"),
-            ])
+                home.appendingPathComponent(".config/claude/projects"),
+            ]
+            if let configDir = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !configDir.isEmpty
+            {
+                claudeDirs.insert(
+                    URL(fileURLWithPath: configDir, isDirectory: true)
+                        .appendingPathComponent("projects"),
+                    at: 0
+                )
+            }
+            var seen = Set<String>()
+            let unique = claudeDirs.filter { url in
+                let key = url.standardizedFileURL.resolvingSymlinksInPath().path
+                return seen.insert(key).inserted
+            }
+            return ScanRoots(providerID: "claude", directories: unique)
         case .gemini:
             return ScanRoots(providerID: "gemini", directories: [
                 home.appendingPathComponent(".gemini/tmp"),
@@ -166,7 +249,10 @@ enum LocalTokenCostScanner {
 
     private static func scan(providerID: String, directories: [URL], now: Date, historyDays: Int) -> AggregateDetail {
         let fileManager = FileManager.default
-        let cutoff = Calendar.current.date(byAdding: .day, value: -historyDays, to: now) ?? now
+        // CodexBar: rolling window is inclusive — 30-day display starts 29 days before now.
+        let lookback = max(0, historyDays - 1)
+        let cutoffDate = Calendar.current.date(byAdding: .day, value: -lookback, to: now) ?? now
+        let cutoff = Calendar.current.startOfDay(for: cutoffDate)
         let todayKey = dayKey(for: now)
         let cutoffDay = dayKey(for: cutoff)
 
@@ -343,29 +429,54 @@ enum LocalTokenCostScanner {
 
     private static func defaultModel(for providerID: String) -> String {
         switch providerID {
-        case "codex": return "gpt-5"
-        case "claude": return "claude"
+        case "codex": return "gpt-5.4" // current default family in local sessions
+        case "claude": return "claude-sonnet-4"
         default: return providerID
         }
     }
 
     /// Returns a model name if this line *declares* one (turn_context / assistant), else nil.
+    /// CodexBar: model lives on turn_context / session_meta; token_count lines use the last seen model.
     private static func trackModel(from json: [String: Any], providerID: String) -> String? {
         switch providerID {
         case "codex":
-            // turn_context / session_meta carry the active model under payload.
+            let type = json["type"] as? String
             if let payload = json["payload"] as? [String: Any] {
-                if let model = normalizeModel(stringValue(payload, keys: ["model"])) { return model }
+                // session_meta / turn_context payload.model
+                if let model = normalizeModel(stringValue(payload, keys: ["model", "model_name"])) {
+                    return model
+                }
                 if let mode = payload["collaboration_mode"] as? [String: Any],
                    let settings = mode["settings"] as? [String: Any],
                    let model = normalizeModel(stringValue(settings, keys: ["model"]))
                 {
                     return model
                 }
+                // Some builds nest model under info
+                if let info = payload["info"] as? [String: Any],
+                   let model = normalizeModel(stringValue(info, keys: ["model"]))
+                {
+                    return model
+                }
+            }
+            // Top-level model on turn_context events
+            if type == "turn_context" || type == "session_meta",
+               let model = normalizeModel(stringValue(json, keys: ["model"]))
+            {
+                return model
+            }
+            return nil
+        case "claude":
+            // Prefer explicit assistant model for sticky fallback
+            if (json["type"] as? String) == "assistant",
+               let message = json["message"] as? [String: Any],
+               let model = normalizeModel(stringValue(message, keys: ["model"]))
+            {
+                return model
             }
             return nil
         default:
-            return nil
+            return normalizeModel(extractGenericModel(from: json))
         }
     }
 
@@ -405,14 +516,20 @@ enum LocalTokenCostScanner {
         if total == 0 { total = inputTokens + outputTokens }
         if total == 0 { return nil }
 
-        let rate = TokenPricingCatalog.rate(forModel: fallbackModel)
+        // Prefer model stamped on this event if present; else sticky turn_context model.
+        let model = normalizeModel(stringValue(payload, keys: ["model"]))
+            ?? normalizeModel(stringValue(info, keys: ["model"]))
+            ?? fallbackModel
         let nonCachedInput = max(0, inputTokens - cachedInput)
-        let cost = Double(nonCachedInput) / 1_000_000 * rate.inputPerMTok
-            + Double(cachedInput) / 1_000_000 * rate.cacheReadPerMTok
-            + Double(outputTokens) / 1_000_000 * rate.outputPerMTok
+        let cost = TokenPricingCatalog.estimateUSD(
+            model: model,
+            inputTokens: nonCachedInput,
+            outputTokens: outputTokens,
+            cacheReadTokens: cachedInput
+        )
 
         return LineUsage(
-            model: fallbackModel,
+            model: model,
             input: inputTokens,
             output: outputTokens,
             cacheRead: cachedInput,
@@ -430,7 +547,7 @@ enum LocalTokenCostScanner {
         else { return nil }
 
         let model = normalizeModel(stringValue(message, keys: ["model"])) ?? "claude"
-        // Skip Claude's internal synthetic/interrupt messages.
+        // Skip Claude's internal synthetic/interrupt messages (<synthetic>).
         guard isPlausibleModel(model) else { return nil }
 
         let input = intValue(usage, keys: ["input_tokens"])
@@ -440,11 +557,14 @@ enum LocalTokenCostScanner {
         let total = input + output + cacheCreate + cacheRead
         if total == 0 { return nil }
 
-        let rate = TokenPricingCatalog.rate(forModel: model)
-        // Cache creation bills roughly at input price; cache read is heavily discounted.
-        let cost = Double(input + cacheCreate) / 1_000_000 * rate.inputPerMTok
-            + Double(cacheRead) / 1_000_000 * rate.cacheReadPerMTok
-            + Double(output) / 1_000_000 * rate.outputPerMTok
+        // CodexBar: cache write = cacheCreation rate (≈1.25× input); cache read discounted.
+        let cost = TokenPricingCatalog.estimateUSD(
+            model: model,
+            inputTokens: input,
+            outputTokens: output,
+            cacheReadTokens: cacheRead,
+            cacheWriteTokens: cacheCreate
+        )
 
         return LineUsage(
             model: model,
@@ -473,10 +593,13 @@ enum LocalTokenCostScanner {
         let total = input + output + cacheRead + cacheCreate
         if total == 0 { return nil }
 
-        let rate = TokenPricingCatalog.rate(forModel: model)
-        let cost = Double(input + cacheCreate) / 1_000_000 * rate.inputPerMTok
-            + Double(cacheRead) / 1_000_000 * rate.cacheReadPerMTok
-            + Double(output) / 1_000_000 * rate.outputPerMTok
+        let cost = TokenPricingCatalog.estimateUSD(
+            model: model,
+            inputTokens: input,
+            outputTokens: output,
+            cacheReadTokens: cacheRead,
+            cacheWriteTokens: cacheCreate
+        )
 
         return LineUsage(
             model: model,
@@ -517,17 +640,7 @@ enum LocalTokenCostScanner {
     // MARK: - Model helpers
 
     private static func normalizeModel(_ raw: String?) -> String? {
-        guard let raw else { return nil }
-        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return nil }
-        // Strip provider prefixes like "openai/gpt-4o" or "[Codex] gpt-5".
-        if name.hasPrefix("["), let close = name.firstIndex(of: "]") {
-            name = String(name[name.index(after: close)...]).trimmingCharacters(in: .whitespaces)
-        }
-        if let slash = name.lastIndex(of: "/") {
-            name = String(name[name.index(after: slash)...])
-        }
-        return name.isEmpty ? nil : name
+        TokenPricingCatalog.normalizeModelID(raw)
     }
 
     /// Rejects session titles, `<synthetic>`, prose, and other non-model strings.
@@ -535,12 +648,13 @@ enum LocalTokenCostScanner {
         let n = name.lowercased()
         if n.isEmpty || n == "unknown" { return false }
         if n.hasPrefix("<") { return false }        // <synthetic>
-        if n.count > 60 { return false }
+        if n.count > 80 { return false }
         if n.contains(" ") { return false }         // titles / sentences
         let families = [
             "gpt", "o1", "o3", "o4", "codex", "claude", "sonnet", "opus", "haiku",
             "gemini", "grok", "glm", "qwen", "kimi", "moonshot", "deepseek",
             "llama", "mistral", "gemma", "flash", "pro", "command", "nova",
+            "kiro", "copilot", "opencode", "auto",
         ]
         return families.contains { n.contains($0) }
     }
@@ -581,7 +695,9 @@ enum LocalTokenCostScanner {
         for key in keys {
             if let v = dict[key] as? Int { return v }
             if let v = dict[key] as? Double { return Int(v) }
+            if let v = dict[key] as? NSNumber { return v.intValue }
             if let v = dict[key] as? String, let i = Int(v) { return i }
+            if let v = dict[key] as? String, let d = Double(v) { return Int(d) }
         }
         return 0
     }
