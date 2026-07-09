@@ -4,6 +4,14 @@ All notable changes to **VibeProxy Ultra** are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-07-09
+
+### Fixed
+- **Menu bar port label** — Proxy port no longer shows a locale thousands separator (e.g. `8,337` → `8337`).
+
+### Changed
+- Removed remaining third-party fork/attribution branding; product is VibeProxy Ultra only.
+
 ## [1.1.0] - 2026-07-09
 
 Analytics accuracy, Kiro quota ground truth, focus-steal fix, and branding cleanup.
