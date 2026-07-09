@@ -391,6 +391,20 @@ class ServerManager: ObservableObject {
             qwenEmail = email
         case .antigravityLogin:
             authProcess.arguments = ["--config", configPath, "-antigravity-login"]
+        case .kiroLogin:
+            authProcess.arguments = ["--config", configPath, "-kiro-login"]
+        case .kiroImport:
+            authProcess.arguments = ["--config", configPath, "-kiro-import"]
+        case .xaiLogin:
+            authProcess.arguments = ["--config", configPath, "-xai-login"]
+        case .cursorLogin:
+            authProcess.arguments = ["--config", configPath, "-cursor-login"]
+        case .codebuddyLogin:
+            authProcess.arguments = ["--config", configPath, "-codebuddy-login"]
+        case .gitlabLogin:
+            authProcess.arguments = ["--config", configPath, "-gitlab-login"]
+        case .kiloLogin:
+            authProcess.arguments = ["--config", configPath, "-kilo-login"]
         }
         
         // Create pipes for output
@@ -586,6 +600,9 @@ class ServerManager: ObservableObject {
             "cli-proxy-api-plus.*-github-copilot-login",
             "cli-proxy-api-plus.*-qwen-login",
             "cli-proxy-api-plus.*-antigravity-login",
+            "cli-proxy-api-plus.*-kiro-login",
+            "cli-proxy-api-plus.*-kiro-import",
+            "cli-proxy-api-plus.*-xai-login",
             "cli-proxy-api-plus.* -login"
         ]
 
@@ -1046,6 +1063,10 @@ class ServerManager: ObservableObject {
         }
     }
     
+    var activeZaiAPIKeys: [String] {
+        loadZaiAPIKeys()
+    }
+
     private func loadZaiAPIKeys() -> [String] {
         let loadResult = zaiAPIKeyStore.loadActiveAPIKeys()
         for issue in loadResult.issues {
@@ -1238,4 +1259,11 @@ enum AuthCommand: Equatable {
     case kimiLogin
     case qwenLogin(email: String)
     case antigravityLogin
+    case kiroLogin
+    case kiroImport
+    case xaiLogin
+    case cursorLogin
+    case codebuddyLogin
+    case gitlabLogin
+    case kiloLogin
 }

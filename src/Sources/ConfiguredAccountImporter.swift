@@ -1,0 +1,584 @@
+import Foundation
+
+enum ConfiguredAccountImportResult {
+    case success(message: String)
+    case failure(message: String)
+}
+
+enum ConfiguredAccountImporter {
+    static func importAccount(
+        _ account: DiscoveredConfiguredAccount,
+        authDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cli-proxy-api")
+    ) -> ConfiguredAccountImportResult {
+        switch account.importKind {
+        case .kiroIDE:
+            return .failure(message: "Kiro import uses the CLI import command")
+        case .codexApp:
+            return importCodexApp(authDirectory: authDirectory, displayName: account.displayName)
+        case .codexOpenCode:
+            return importCodexOpenCode(authDirectory: authDirectory, displayName: account.displayName)
+        case .claudeCode:
+            return importClaudeCode(authDirectory: authDirectory, displayName: account.displayName)
+        case .geminiCLI:
+            return importGeminiCLI(authDirectory: authDirectory, displayName: account.displayName)
+        case .copilotApp:
+            return importCopilotApp(authDirectory: authDirectory, displayName: account.displayName)
+        case .grokCLI:
+            return importGrokCLI(authDirectory: authDirectory, displayName: account.displayName)
+        case .grokOpenCode:
+            return importGrokOpenCode(authDirectory: authDirectory, displayName: account.displayName)
+        case let .antigravityCockpit(email):
+            return importAntigravityCockpit(authDirectory: authDirectory, email: email, displayName: account.displayName)
+        case let .zaiAPIKey(apiKey):
+            return importZaiAPIKey(apiKey: apiKey, authDirectory: authDirectory)
+        case .opencodeGo:
+            return .failure(message: "OpenCode Go import uses the custom provider credential store")
+        }
+    }
+
+    static func importZaiAPIKey(
+        apiKey: String,
+        authDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cli-proxy-api")
+    ) -> ConfiguredAccountImportResult {
+        do {
+            let store = ZAIAPIKeyStore(directoryURL: authDirectory)
+            let filePath = try store.save(apiKey: apiKey)
+            NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
+            return .success(message: "Imported Z.AI API key to \(filePath.lastPathComponent)")
+        } catch {
+            return .failure(message: error.localizedDescription)
+        }
+    }
+
+    // MARK: - Codex
+
+    private static func importCodexApp(authDirectory: URL, displayName: String) -> ConfiguredAccountImportResult {
+        let source = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/auth.json")
+        guard let payload = NativeUsageFetcher.readAuthPayload(at: source),
+              let tokens = payload["tokens"] as? [String: Any],
+              let accessToken = tokens["access_token"] as? String,
+              let refreshToken = tokens["refresh_token"] as? String
+        else {
+            return .failure(message: "Could not read Codex app credentials from ~/.codex/auth.json")
+        }
+
+        let email = JWTEmailExtractor.email(from: tokens["id_token"] as? String)
+            ?? JWTEmailExtractor.email(from: accessToken)
+            ?? displayName
+        let now = Date()
+        let expired = ISO8601DateFormatter().string(from: now.addingTimeInterval(3600))
+
+        var record: [String: Any] = [
+            "type": "codex",
+            "email": email,
+            "access_token": accessToken,
+            "refresh_token": refreshToken,
+            "account_id": tokens["account_id"] as? String ?? "",
+            "id_token": tokens["id_token"] as? String ?? "",
+            "expires_in": 3600,
+            "expired": expired,
+            "last_refresh": expired,
+            "timestamp": Int(now.timeIntervalSince1970 * 1000),
+        ]
+
+        if let lastRefresh = payload["last_refresh"] as? String {
+            record["last_refresh"] = lastRefresh
+        }
+
+        return writeAuthRecord(
+            record,
+            filename: "codex-\(sanitizeFilename(email)).json",
+            authDirectory: authDirectory,
+            successLabel: "Imported \(email) from Codex app"
+        )
+    }
+
+    // MARK: - Codex (OpenCode)
+
+    private static func importCodexOpenCode(
+        authDirectory: URL,
+        displayName: String
+    ) -> ConfiguredAccountImportResult {
+        let source = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/opencode/auth.json")
+        let xdgSource = ProcessInfo.processInfo.environment["XDG_DATA_HOME"]
+            .map { URL(fileURLWithPath: $0).appendingPathComponent("opencode/auth.json") }
+        let candidates = [
+            source,
+            xdgSource,
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/opencode/auth.json"),
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".opencode/auth.json"),
+        ].compactMap { $0 }
+
+        var openai: [String: Any]?
+        for candidate in candidates {
+            if let payload = NativeUsageFetcher.readAuthPayload(at: candidate),
+               let entry = payload["openai"] as? [String: Any]
+            {
+                openai = entry
+                break
+            }
+        }
+
+        guard let openai,
+              let accessToken = (openai["access"] as? String) ?? (openai["access_token"] as? String),
+              !accessToken.isEmpty
+        else {
+            return .failure(message: "Could not read Codex/OpenAI credentials from OpenCode auth.json")
+        }
+
+        let refreshToken = (openai["refresh"] as? String) ?? (openai["refresh_token"] as? String) ?? ""
+        let email = JWTEmailExtractor.email(from: accessToken)
+            ?? JWTEmailExtractor.email(from: openai["id_token"] as? String)
+            ?? displayName
+        let accountID = (openai["accountId"] as? String)
+            ?? (openai["account_id"] as? String)
+            ?? ""
+        let now = Date()
+        let expired = ISO8601DateFormatter().string(from: now.addingTimeInterval(3600))
+
+        let record: [String: Any] = [
+            "type": "codex",
+            "email": email,
+            "access_token": accessToken,
+            "refresh_token": refreshToken,
+            "account_id": accountID,
+            "id_token": openai["id_token"] as? String ?? "",
+            "expires_in": 3600,
+            "expired": expired,
+            "last_refresh": ISO8601DateFormatter().string(from: now),
+            "timestamp": Int(now.timeIntervalSince1970 * 1000),
+        ]
+
+        return writeAuthRecord(
+            record,
+            filename: "codex-\(sanitizeFilename(email)).json",
+            authDirectory: authDirectory,
+            successLabel: "Imported \(email) from OpenCode"
+        )
+    }
+
+    // MARK: - Claude
+
+    private static func importClaudeCode(authDirectory: URL, displayName: String) -> ConfiguredAccountImportResult {
+        let credentialsURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/.credentials.json")
+
+        let data: Data?
+        if let fileData = try? Data(contentsOf: credentialsURL),
+           let root = try? JSONSerialization.jsonObject(with: fileData) as? [String: Any],
+           root["claudeAiOauth"] != nil
+        {
+            data = fileData
+        } else if let keychainData = claudeKeychainString().data(using: .utf8),
+                  let root = try? JSONSerialization.jsonObject(with: keychainData) as? [String: Any],
+                  root["claudeAiOauth"] != nil
+        {
+            data = keychainData
+        } else {
+            return .failure(message: "Could not read Claude Code credentials. Sign into Claude Code first.")
+        }
+
+        guard let data,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = root["claudeAiOauth"] as? [String: Any],
+              let accessToken = oauth["accessToken"] as? String,
+              !accessToken.isEmpty
+        else {
+            return .failure(message: "Claude Code credentials are missing an access token")
+        }
+
+        let refreshToken = oauth["refreshToken"] as? String ?? ""
+        let expiresAtMs = oauth["expiresAt"] as? Double
+        let expiresAt = expiresAtMs.map { Date(timeIntervalSince1970: $0 / 1000) }
+        let email = (oauth["email"] as? String)
+            ?? JWTEmailExtractor.email(from: accessToken)
+            ?? displayName
+
+        let now = Date()
+        let expired = expiresAt.map { ISO8601DateFormatter().string(from: $0) }
+            ?? ISO8601DateFormatter().string(from: now.addingTimeInterval(3600))
+
+        let record: [String: Any] = [
+            "type": "claude",
+            "email": email,
+            "access_token": accessToken,
+            "refresh_token": refreshToken,
+            "expired": expired,
+            "last_refresh": ISO8601DateFormatter().string(from: now),
+        ]
+
+        return writeAuthRecord(
+            record,
+            filename: "claude-\(sanitizeFilename(email)).json",
+            authDirectory: authDirectory,
+            successLabel: "Imported \(email) from Claude Code"
+        )
+    }
+
+    // MARK: - Gemini
+
+    private static func importGeminiCLI(authDirectory: URL, displayName: String) -> ConfiguredAccountImportResult {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let sources = [
+            home.appendingPathComponent(".gemini/oauth_creds.json"),
+            home.appendingPathComponent(".gemini/oauth.json"),
+            home.appendingPathComponent(".config/gemini/oauth_creds.json"),
+            home.appendingPathComponent(".config/gcloud/application_default_credentials.json"),
+        ]
+        guard let source = sources.first(where: { FileManager.default.fileExists(atPath: $0.path) }),
+              let payload = NativeUsageFetcher.readAuthPayload(at: source)
+        else {
+            return .failure(message: "Could not read Gemini CLI credentials")
+        }
+
+        let email = JWTEmailExtractor.email(from: payload["id_token"] as? String) ?? displayName
+        let projectID = (try? Data(contentsOf: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/projects.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            .flatMap { $0["active"] as? String }
+            ?? "default"
+
+        var record = payload
+        record["type"] = "gemini"
+        record["email"] = email
+        record["project_id"] = projectID
+        record["auto"] = true
+        record["checked"] = true
+
+        let filename: String
+        if projectID.isEmpty || projectID == "default" {
+            filename = "gemini-\(sanitizeFilename(email))-all.json"
+        } else {
+            filename = "gemini-\(sanitizeFilename(email))-\(sanitizeFilename(projectID)).json"
+        }
+
+        return writeAuthRecord(
+            record,
+            filename: filename,
+            authDirectory: authDirectory,
+            successLabel: "Imported \(email) from Gemini CLI"
+        )
+    }
+
+    // MARK: - Copilot
+
+    private static func importCopilotApp(authDirectory: URL, displayName: String) -> ConfiguredAccountImportResult {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let sources = [
+            home.appendingPathComponent(".config/github-copilot/oauth.json"),
+            home.appendingPathComponent(".config/github-copilot/apps.json"),
+            home.appendingPathComponent(".config/github-copilot/hosts.json"),
+            home.appendingPathComponent("Library/Application Support/github-copilot/oauth.json"),
+        ]
+
+        var entries: [[String: Any]] = []
+        for source in sources {
+            guard let payload = NativeUsageFetcher.readAuthPayload(at: source) else { continue }
+            if let list = payload["https://github.com/login/oauth"] as? [[String: Any]] {
+                entries.append(contentsOf: list)
+            } else if let list = payload["github.com"] as? [[String: Any]] {
+                entries.append(contentsOf: list)
+            } else if let host = payload["github.com"] as? [String: Any] {
+                var normalized = host
+                if normalized["accessToken"] == nil {
+                    normalized["accessToken"] = host["oauth_token"] ?? host["token"]
+                }
+                if normalized["account"] == nil, let user = host["user"] as? String {
+                    normalized["account"] = ["login": user, "label": user]
+                }
+                entries.append(normalized)
+            }
+        }
+
+        guard !entries.isEmpty else {
+            return .failure(message: "Could not read GitHub Copilot credentials")
+        }
+
+        let normalizedDisplay = displayName.lowercased()
+        guard let entry = entries.first(where: { candidate in
+            let account = candidate["account"] as? [String: Any]
+            let label = (account?["label"] as? String)?.lowercased()
+            let login = (account?["login"] as? String)?.lowercased()
+            return label == normalizedDisplay || login == normalizedDisplay
+        }) ?? entries.first,
+              let accessToken = (entry["accessToken"] as? String)
+                ?? (entry["access_token"] as? String)
+                ?? (entry["oauth_token"] as? String)
+                ?? (entry["token"] as? String),
+              !accessToken.isEmpty
+        else {
+            return .failure(message: "No GitHub Copilot access token found")
+        }
+
+        let account = entry["account"] as? [String: Any]
+        let username = (account?["label"] as? String)
+            ?? (account?["login"] as? String)
+            ?? displayName
+
+        let record: [String: Any] = [
+            "type": "github-copilot",
+            "access_token": accessToken,
+            "token_type": "bearer",
+            "scope": "",
+            "username": username,
+            "email": username,
+            "timestamp": Int(Date().timeIntervalSince1970 * 1000),
+        ]
+
+        return writeAuthRecord(
+            record,
+            filename: "github-copilot-\(sanitizeFilename(username)).json",
+            authDirectory: authDirectory,
+            successLabel: "Imported \(username) from GitHub Copilot"
+        )
+    }
+
+    // MARK: - Grok
+
+    private static func importGrokCLI(authDirectory: URL, displayName: String) -> ConfiguredAccountImportResult {
+        let source = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".grok/auth.json")
+        guard let payload = NativeUsageFetcher.readAuthPayload(at: source),
+              let (_, entry) = grokPreferredEntry(in: payload),
+              let accessToken = entry["key"] as? String
+        else {
+            return .failure(message: "Could not read Grok credentials from ~/.grok/auth.json")
+        }
+
+        let email = (entry["email"] as? String) ?? displayName
+        let refreshToken = entry["refresh_token"] as? String ?? ""
+        let expiresAt = grokExpiresAt(from: entry)
+        let now = Date()
+
+        let record: [String: Any] = [
+            "type": "xai",
+            "email": email,
+            "access_token": accessToken,
+            "refresh_token": refreshToken,
+            "expires_in": 3600,
+            "expired": expiresAt.map { ISO8601DateFormatter().string(from: $0) }
+                ?? ISO8601DateFormatter().string(from: now.addingTimeInterval(3600)),
+            "last_refresh": ISO8601DateFormatter().string(from: now),
+            "auth_kind": "oauth",
+        ]
+
+        return writeAuthRecord(
+            record,
+            filename: "xai-\(sanitizeFilename(email)).json",
+            authDirectory: authDirectory,
+            successLabel: "Imported \(email) from Grok CLI"
+        )
+    }
+
+    // MARK: - Grok (OpenCode)
+
+    private static func importGrokOpenCode(
+        authDirectory: URL,
+        displayName: String
+    ) -> ConfiguredAccountImportResult {
+        let source = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/opencode/auth.json")
+        guard let payload = NativeUsageFetcher.readAuthPayload(at: source),
+              let xai = payload["xai"] as? [String: Any],
+              let accessToken = xai["access"] as? String,
+              !accessToken.isEmpty
+        else {
+            return .failure(message: "Could not read Grok credentials from OpenCode auth.json")
+        }
+
+        let email = JWTEmailExtractor.email(from: accessToken) ?? displayName
+        let refreshToken = xai["refresh"] as? String ?? ""
+        let now = Date()
+        let expired = grokExpiresAt(from: xai)
+            .map { ISO8601DateFormatter().string(from: $0) }
+            ?? ISO8601DateFormatter().string(from: now.addingTimeInterval(3600))
+
+        let record: [String: Any] = [
+            "type": "xai",
+            "email": email,
+            "access_token": accessToken,
+            "refresh_token": refreshToken,
+            "expires_in": 3600,
+            "expired": expired,
+            "last_refresh": ISO8601DateFormatter().string(from: now),
+            "auth_kind": "oauth",
+        ]
+
+        return writeAuthRecord(
+            record,
+            filename: "xai-\(sanitizeFilename(email)).json",
+            authDirectory: authDirectory,
+            successLabel: "Imported \(email) from OpenCode"
+        )
+    }
+
+    // MARK: - Antigravity
+
+    private static func importAntigravityCockpit(
+        authDirectory: URL,
+        email: String,
+        displayName: String
+    ) -> ConfiguredAccountImportResult {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let accountDirs = [
+            home.appendingPathComponent(".antigravity_cockpit/accounts"),
+            home.appendingPathComponent(".antigravity/accounts"),
+            home.appendingPathComponent("Library/Application Support/Antigravity/accounts"),
+        ]
+
+        let normalizedEmail = email.lowercased()
+        var matchedPayload: [String: Any]?
+        var matchedToken: [String: Any]?
+
+        for accountsDir in accountDirs {
+            guard let files = try? FileManager.default.contentsOfDirectory(
+                at: accountsDir,
+                includingPropertiesForKeys: nil
+            ) else { continue }
+
+            if let file = files.first(where: { candidate in
+                guard candidate.pathExtension == "json",
+                      !candidate.lastPathComponent.hasSuffix(".bak"),
+                      let payload = NativeUsageFetcher.readAuthPayload(at: candidate)
+                else { return false }
+                let candidateEmail = (
+                    (payload["email"] as? String)
+                        ?? ((payload["token"] as? [String: Any])?["email"] as? String)
+                        ?? ""
+                ).lowercased()
+                return candidateEmail == normalizedEmail
+            }),
+               let payload = NativeUsageFetcher.readAuthPayload(at: file)
+            {
+                matchedPayload = payload
+                matchedToken = payload["token"] as? [String: Any]
+                break
+            }
+        }
+
+        guard let payload = matchedPayload,
+              let accessToken = (matchedToken?["access_token"] as? String)
+                ?? (payload["access_token"] as? String)
+        else {
+            return .failure(message: "Could not find Antigravity credentials for \(displayName)")
+        }
+        let token = matchedToken ?? [:]
+
+        let refreshToken = token["refresh_token"] as? String
+            ?? payload["refresh_token"] as? String
+            ?? ""
+        let expiresIn = token["expires_in"] as? Int ?? payload["expires_in"] as? Int ?? 3600
+        let now = Date()
+        let expired = (token["expiry_timestamp"] as? Double)
+            .map { Date(timeIntervalSince1970: $0) }
+            .map { ISO8601DateFormatter().string(from: $0) }
+            ?? ISO8601DateFormatter().string(from: now.addingTimeInterval(TimeInterval(expiresIn)))
+
+        var record: [String: Any] = [
+            "type": "antigravity",
+            "email": payload["email"] as? String ?? displayName,
+            "access_token": accessToken,
+            "refresh_token": refreshToken,
+            "expires_in": expiresIn,
+            "expired": expired,
+            "timestamp": Int(now.timeIntervalSince1970 * 1000),
+        ]
+
+        if let projectID = payload["project_id"] as? String, !projectID.isEmpty {
+            record["project_id"] = projectID
+        }
+
+        let resolvedEmail = record["email"] as? String ?? displayName
+        return writeAuthRecord(
+            record,
+            filename: "antigravity-\(sanitizeFilename(resolvedEmail)).json",
+            authDirectory: authDirectory,
+            successLabel: "Imported \(resolvedEmail) from Antigravity"
+        )
+    }
+
+    // MARK: - Shared helpers
+
+    private static func writeAuthRecord(
+        _ record: [String: Any],
+        filename: String,
+        authDirectory: URL,
+        successLabel: String
+    ) -> ConfiguredAccountImportResult {
+        do {
+            try FileManager.default.createDirectory(at: authDirectory, withIntermediateDirectories: true)
+            let destination = authDirectory.appendingPathComponent(filename)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                return .failure(message: "Account already exists at \(filename)")
+            }
+            let data = try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: destination, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+            NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
+            return .success(message: successLabel)
+        } catch {
+            return .failure(message: error.localizedDescription)
+        }
+    }
+
+    private static func sanitizeFilename(_ value: String) -> String {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@._-")
+        let sanitized = value.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        return String(sanitized).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    private static func claudeKeychainString() -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return "" }
+        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private static func grokExpiresAt(from entry: [String: Any]) -> Date? {
+        if let iso = entry["expires_at"] as? String, !iso.isEmpty {
+            let formatters: [ISO8601DateFormatter] = {
+                let withFractional = ISO8601DateFormatter()
+                withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                let standard = ISO8601DateFormatter()
+                standard.formatOptions = [.withInternetDateTime]
+                return [withFractional, standard]
+            }()
+            for formatter in formatters {
+                if let date = formatter.date(from: iso) { return date }
+            }
+        }
+        if let ms = entry["expires"] as? Double {
+            return Date(timeIntervalSince1970: ms / 1000)
+        }
+        if let seconds = entry["expires_at"] as? Double {
+            return Date(timeIntervalSince1970: seconds)
+        }
+        return nil
+    }
+
+    private static func grokPreferredEntry(in root: [String: Any]) -> (String, [String: Any])? {
+        let oidcPrefix = "https://auth.x.ai::"
+        let legacyScope = "https://accounts.x.ai/sign-in"
+        if let match = root.first(where: { $0.key.hasPrefix(oidcPrefix) }),
+           let entry = match.value as? [String: Any]
+        {
+            return (match.key, entry)
+        }
+        if let entry = root[legacyScope] as? [String: Any] {
+            return (legacyScope, entry)
+        }
+        return root.compactMap { key, value -> (String, [String: Any])? in
+            guard let entry = value as? [String: Any], entry["key"] != nil else { return nil }
+            return (key, entry)
+        }.first
+    }
+}

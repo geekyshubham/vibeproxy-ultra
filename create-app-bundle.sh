@@ -113,13 +113,12 @@ echo -e "${BLUE}Setting version to: ${VERSION} (build ${BUILD_NUMBER})${NC}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "$APP_DIR/Contents/Info.plist"
 
-# Update SUFeedURL based on architecture (for Sparkle auto-updates)
+# Sparkle auto-updates are disabled for this unofficial VibeProxy Ultra fork.
+# Do not point SUFeedURL at automazeio/vibeproxy appcast feeds.
 TARGET_ARCH="${TARGET_ARCH:-arm64}"
-if [ "$TARGET_ARCH" = "x86_64" ]; then
-    APPCAST_URL="https://raw.githubusercontent.com/automazeio/vibeproxy/main/appcast-x86_64.xml"
-    echo -e "${BLUE}Setting Sparkle feed URL for Intel: ${APPCAST_URL}${NC}"
-    /usr/libexec/PlistBuddy -c "Set :SUFeedURL ${APPCAST_URL}" "$APP_DIR/Contents/Info.plist"
-fi
+echo -e "${YELLOW}Sparkle auto-update checks disabled (unofficial fork)${NC}"
+/usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Set :SUAutomaticallyUpdate false" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
 
 # Create PkgInfo
 echo -e "${BLUE}Creating PkgInfo...${NC}"

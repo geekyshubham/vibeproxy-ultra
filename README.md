@@ -1,156 +1,168 @@
-# VibeProxy
+# VibeProxy Ultra
 
 <p align="center">
-  <img src="icon.png" width="128" height="128" alt="VibeProxy Icon">
+  <img src="icon.png" width="128" height="128" alt="VibeProxy Ultra Icon">
 </p>
 
 <p align="center">
-<a href="https://automaze.io" rel="nofollow"><img alt="Automaze" src="https://img.shields.io/badge/By-automaze.io-4b3baf" style="max-width: 100%;"></a>
-<a href="https://github.com/automazeio/vibeproxy/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-28a745" style="max-width: 100%;"></a>
-<a href="http://x.com/intent/follow?screen_name=aroussi" rel="nofollow"><img alt="Follow on 𝕏" src="https://img.shields.io/badge/Follow-%F0%9D%95%8F/@aroussi-1c9bf0" style="max-width: 100%;"></a>
-<a href="https://github.com/automazeio/vibeproxy"><img alt="Star this repo" src="https://img.shields.io/github/stars/automazeio/vibeproxy.svg?style=social&amp;label=Star%20this%20repo&amp;maxAge=60" style="max-width: 100%;"></a></p>
+<a href="https://github.com/Geekyshubham/vibeproxy-ultra/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-28a745"></a>
+<a href="https://github.com/automazeio/vibeproxy"><img alt="Based on VibeProxy" src="https://img.shields.io/badge/Based%20on-automazeio%2Fvibeproxy-4b3baf"></a>
+<a href="https://github.com/Geekyshubham/vibeproxy-ultra"><img alt="Unofficial fork" src="https://img.shields.io/badge/Status-Unofficial%20fork-orange"></a>
 </p>
 
-**Stop paying twice for AI.** VibeProxy is a beautiful native macOS menu bar app that lets you use your existing Claude Code, ChatGPT, **Gemini**, **Kimi**, **Qwen**, **Antigravity**, and **Z.AI GLM** subscriptions with powerful AI coding tools like **[Factory Droids](https://app.factory.ai/r/FM8BJHFQ)**.
+**VibeProxy Ultra** is an **unofficial enhanced fork** of [VibeProxy](https://github.com/automazeio/vibeproxy) by Automaze, Ltd.
 
-Built on [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus), it handles OAuth authentication, token management, and API routing automatically. One click to authenticate, zero friction to code.
+> **Not affiliated with Automaze, OpenAI, Anthropic, Google, xAI, or any AI provider.**  
+> Original project: [automazeio/vibeproxy](https://github.com/automazeio/vibeproxy) · Original license: **MIT**
 
+Use your existing Claude Code, ChatGPT/Codex, Gemini, Antigravity, GitHub Copilot, Z.AI GLM, Grok, Kimi, Qwen, OpenCode Go, and related subscriptions with local AI coding tools — **no separate API keys required** for OAuth-based providers.
+
+Built on [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) for OAuth, token management, and API routing.
 
 <p align="center">
-<br>
-  <a href="https://www.loom.com/share/5cf54acfc55049afba725ab443dd3777"><img src="vibeproxy-factory-video.webp" width="600" height="380" alt="VibeProxy Screenshot" border="0"></a>
+  <img src="docs/screenshot-usage.png" width="720" alt="VibeProxy Ultra usage panel preview">
 </p>
-
-> [!TIP]
-> 📣 **NEW: Vercel AI Gateway Integration!**<br>Route your Claude requests through [Vercel's officially sanctioned AI Gateway](https://vercel.com/docs/ai-gateway) for safer access to your Claude Max subscription. No more worrying about account risks from using OAuth tokens directly!
->
-> **Latest models supported:** Gemini 3 Pro (via Antigravity), GPT-5.1 / GPT-5.1 Codex, Claude Sonnet 4.5 / Opus 4.5 with extended thinking, GitHub Copilot, Z.AI GLM-4.7, and Kimi! 🚀 
-> 
-> **Setup Guides:**
-> - [Factory CLI Setup →](FACTORY_SETUP.md) - Use Factory Droids with your AI subscriptions
-> - [Amp CLI Setup →](AMPCODE_SETUP.md) - Use Amp CLI with fallback to your subscriptions
 
 ---
 
-## Features
+## What’s new in Ultra
 
-- 🎯 **Native macOS Experience** - Clean, native SwiftUI interface that feels right at home on macOS
-- 🚀 **One-Click Server Management** - Start/stop the proxy server from your menu bar
-- 🔐 **Easy Authentication** - Authenticate with Codex, Claude Code, Gemini, Kimi, Qwen, and Antigravity (OAuth), plus Z.AI GLM (API key) directly from the app
-- 🛡️ **Vercel AI Gateway** - Route Claude requests through [Vercel's AI Gateway](https://vercel.com/docs/ai-gateway) for safer access to your Claude Max subscription without risking your account from direct OAuth token usage
-- 👥 **Multi-Account Support** - Connect multiple accounts per provider with automatic round-robin distribution and failover when rate-limited
-- 🎚️ **Provider Priority** - Enable/disable providers to control which models are available (instant hot reload)
-- 📊 **Real-Time Status** - Live connection status and automatic credential detection
-- 🔄 **Automatic App Updates** - Starting with v1.6, VibeProxy checks for updates daily and installs them seamlessly via Sparkle
-- 🎨 **Beautiful Icons** - Custom icons with dark mode support
-- 💾 **Self-Contained** - Everything bundled inside the .app (server binary, config, static files)
+Ultra keeps the native macOS menu bar experience and adds production-oriented account, usage, and session reliability features:
 
+| Area | Ultra improvements |
+|------|--------------------|
+| **Usage limits** | Live per-account usage cards with streaming updates (results appear as each account finishes, not only after everything is done) |
+| **Antigravity** | Separate Gemini Pro/Flash vs Claude/Opus quota groups via Cloud Code `retrieveUserQuota` + `retrieveUserQuotaSummary` |
+| **ChatGPT / Codex** | Multi-subscription visibility (e.g. Go vs Team/Enterprise windows) via Codex usage APIs |
+| **Z.AI Coding Plan** | Quota limits from `api.z.ai` monitor endpoints (similar to zcode.z.ai) |
+| **Account import** | Import configured local accounts for providers (Claude, Codex, Gemini, Antigravity, Z.AI, Copilot, Grok, OpenCode Go, and more) |
+| **False expiry fix** | Access-token clock expiry alone no longer marks a session dead when a usable refresh token still exists |
+| **Proactive refresh** | Background token refresh with grace window so sessions stay warm |
+| **Quota wake** | “Wake 5h” style keep-alive / dummy pings to reduce idle quota window surprises |
+| **OpenCode Go** | First-class OpenAI-compatibility provider entry (not hidden as reserved) |
+| **Menu bar UX** | Richer popover: server status, accounts, usage refresh, settings entry |
 
-## Installation
+Core VibeProxy capabilities remain: one-click server start/stop, multi-account round-robin, provider enable/disable, Vercel AI Gateway option for Claude, and a self-contained `.app` bundle.
 
-**Requirements:** macOS 13+ (Ventura or later)
+---
 
-### Download Pre-built Release (Recommended)
+## Attribution & license
 
-1. Go to the [**Releases**](https://github.com/automazeio/vibeproxy/releases) page
-2. Download the appropriate version for your Mac:
-   - **Apple Silicon** (M1/M2/M3/M4): `VibeProxy-arm64.zip`
-   - **Intel**: `VibeProxy-x86_64.zip` *(untested - please report issues)*
-3. Extract and drag `VibeProxy.app` to `/Applications`
-4. Launch VibeProxy
+```text
+Based on VibeProxy by Automaze, Ltd., licensed under MIT.
+VibeProxy Ultra is an unofficial fork / enhanced version.
+Original: https://github.com/automazeio/vibeproxy
+```
 
-**Code Signed & Notarized** ✅ - No Gatekeeper warnings, installs seamlessly on macOS.
+- Keep the original **MIT** `LICENSE` (Automaze copyright preserved).
+- Ultra modifications: **Copyright (c) 2026 Geekyshubham / Shubh**.
+- You may use, modify, publish, and distribute under MIT; **do not** remove the original copyright notice.
+- Code license ≠ trademarks: do not imply this is the official Automaze product.
 
-### Build from Source
+See [LICENSE](LICENSE) for the full text.
 
-Want to build it yourself? See [**INSTALLATION.md**](INSTALLATION.md) for detailed build instructions.
+---
 
-## Usage
+## Important risks (read before using)
 
-### First Launch
+| Risk | Notes |
+|------|--------|
+| **Provider ToS** | Proxying Claude / ChatGPT / Gemini / other subscriptions may violate a provider’s terms depending on use. Use at your own risk. |
+| **Branding** | This is **VibeProxy Ultra**, not official VibeProxy. |
+| **Secrets** | Never commit OAuth tokens, API keys, or credentials. Auth files live under `~/.cli-proxy-api/` on your machine only. |
+| **Dependencies** | Bundled `cli-proxy-api-plus` and third-party libs may have their own licenses — verify before redistribution. |
+| **Auto-updates** | Sparkle checks against automazeio feeds are **disabled** in this fork so upstream releases do not overwrite Ultra. |
 
-1. Launch VibeProxy - you'll see a menu bar icon
-2. Click the icon and select "Open Settings"
-3. The server will start automatically
-4. Click "Connect" for Claude Code, Codex, Gemini, Kimi, Qwen, or Antigravity to authenticate, or "Add Account" for Z.AI GLM
+---
 
-### Authentication
+## Features (full list)
 
-When you click "Connect" for an OAuth provider:
-1. Your browser opens with the OAuth page
-2. Complete the authentication in the browser
-3. VibeProxy automatically detects your credentials
-4. Status updates to show you're connected
+- Native SwiftUI macOS menu bar app
+- One-click local proxy server management
+- OAuth connect flows for major providers + API-key providers (e.g. Z.AI)
+- Multi-account support with failover when rate-limited
+- Provider priority / enable toggles with hot reload
+- **Streaming usage dashboard** per account and quota window
+- **Local app account import** for configured provider credentials
+- **Proactive token refresh** + **quota wake** keep-alives
+- Vercel AI Gateway routing option for Claude
+- Dark-mode friendly icons and menu bar status
+- Self-contained app bundle (binary + config)
 
-When you click "Add Account" for Z.AI GLM:
-1. Paste your provider API key
-2. VibeProxy stores it in `~/.cli-proxy-api/`
-3. The provider becomes available through the proxy immediately
-
-### Server Management
-
-- **Toggle Server**: Click the status (Running/Stopped) to start/stop
-- **Menu Bar Icon**: Shows active/inactive state
-- **Launch at Login**: Toggle to start VibeProxy automatically
+---
 
 ## Requirements
 
 - macOS 13.0 (Ventura) or later
+- Xcode Command Line Tools / Swift 5.9+ to build from source
 
-## Development
+## Build from source
 
-### Project Structure
-
-```
-VibeProxy/
-├── Sources/
-│   ├── main.swift              # App entry point
-│   ├── AppDelegate.swift       # Menu bar & window management
-│   ├── ServerManager.swift     # Server process control & auth
-│   ├── SettingsView.swift      # Main UI
-│   ├── AuthStatus.swift        # Auth file monitoring
-│   └── Resources/
-│       ├── AppIcon.iconset     # App icon
-│       ├── AppIcon.icns        # App icon
-│       ├── cli-proxy-api-plus  # CLIProxyAPIPlus binary
-│       ├── config.yaml         # CLIProxyAPIPlus config
-│       ├── icon-active.png     # Menu bar icon (active)
-│       ├── icon-inactive.png   # Menu bar icon (inactive)
-│       ├── icon-claude.png     # Claude Code service icon
-│       ├── icon-codex.png      # Codex service icon
-│       ├── icon-gemini.png     # Gemini service icon
-│       ├── icon-qwen.png       # Qwen service icon
-│       └── icon-zai.png        # Z.AI GLM service icon
-├── Package.swift               # Swift Package Manager config
-├── Info.plist                  # macOS app metadata
-├── build.sh                    # Resource bundling script
-├── create-app-bundle.sh        # App bundle creation script
-└── Makefile                    # Build automation
+```bash
+git clone https://github.com/Geekyshubham/vibeproxy-ultra.git
+cd vibeproxy-ultra
+make app          # creates VibeProxy.app
+make run          # build + launch
+# or
+make install      # install to /Applications
 ```
 
-### Key Components
+See [INSTALLATION.md](INSTALLATION.md) for more detail (paths still refer to the app bundle name `VibeProxy.app`).
 
-- **AppDelegate**: Manages the menu bar item and settings window lifecycle
-- **ServerManager**: Controls the cli-proxy-api server process and OAuth authentication
-- **SettingsView**: SwiftUI interface with native macOS design
-- **AuthStatus**: Monitors `~/.cli-proxy-api/` for authentication files
-- **File Monitoring**: Real-time updates when auth files are added/removed
+## Usage
 
-## Credits
+1. Launch the app — a menu bar icon appears.
+2. Click the icon for the **Ultra** popover (status, accounts, usage).
+3. Open **Settings** to connect providers, import local accounts, and manage the server.
+4. Point coding tools (Factory, Amp, etc.) at the local proxy (default thinking/proxy path uses ports documented in the original setup guides).
 
-VibeProxy is built on top of [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus), an excellent unified proxy server for AI services with support for third-party providers.
+Setup guides from upstream still apply conceptually:
 
-Special thanks to the CLIProxyAPIPlus project for providing the core functionality that makes VibeProxy possible.
+- [Factory CLI Setup](FACTORY_SETUP.md)
+- [Amp CLI Setup](AMPCODE_SETUP.md)
 
-## License
-
-MIT License - see LICENSE file for details
-
-## Support
-
-- **Report Issues**: [GitHub Issues](https://github.com/automazeio/vibeproxy/issues)
-- **Website**: [automaze.io](https://automaze.io)
+Replace any `automazeio/vibeproxy` download links with this Ultra repo when installing the fork.
 
 ---
 
-© 2025 [Automaze, Ltd.](https://automaze.io) All rights reserved.
+## Project structure
+
+```text
+vibeproxy-ultra/
+├── LICENSE                 # MIT (Automaze + Ultra copyright)
+├── README.md
+├── Makefile / create-app-bundle.sh
+├── src/
+│   ├── Package.swift
+│   ├── Info.plist
+│   ├── Sources/            # SwiftUI app + usage/import/refresh services
+│   │   └── Resources/      # cli-proxy-api-plus, config.yaml, icons
+│   └── Tests/
+└── icon.png                # Ultra app icon
+```
+
+Notable Ultra sources:
+
+- `NativeUsageFetcher.swift` / `UsageStore.swift` / `ProviderUsageCardView.swift` — usage limits UI
+- `ConfiguredAccountDiscovery.swift` / `ConfiguredAccountImporter.swift` — local account import
+- `TokenRefreshService.swift` / `QuotaWakeService.swift` — session reliability
+- `MenuBarPanelView.swift` / `MenuBarPopoverController.swift` — enhanced menu bar
+
+---
+
+## Credits
+
+- **Original VibeProxy**: [Automaze, Ltd.](https://automaze.io) — [automazeio/vibeproxy](https://github.com/automazeio/vibeproxy)
+- **Proxy engine**: [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) / related CLIProxy ecosystem
+- **Ultra fork**: Geekyshubham
+
+## Support
+
+- **Issues (Ultra)**: [Geekyshubham/vibeproxy-ultra](https://github.com/Geekyshubham/vibeproxy-ultra/issues)
+- **Upstream project**: [automazeio/vibeproxy](https://github.com/automazeio/vibeproxy)
+
+---
+
+© 2025 Automaze, Ltd. (original VibeProxy)  
+© 2026 Geekyshubham (VibeProxy Ultra modifications)  
+MIT License — see [LICENSE](LICENSE).

@@ -6,10 +6,12 @@ import Sparkle
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     var statusItem: NSStatusItem!
-    var menu: NSMenu!
     weak var settingsWindow: NSWindow?
     var serverManager: ServerManager!
     var thinkingProxy: ThinkingProxy!
+    let authManager = AuthManager()
+    let usageStore = UsageStore()
+    private var popoverController: MenuBarPopoverController!
     private let notificationCenter = UNUserNotificationCenter.current()
     private var notificationPermissionGranted = false
     private let updaterController: SPUStandardUpdaterController
@@ -20,16 +22,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     private var polledConfigInputsFingerprint = ""
     
     override init() {
-        self.updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        // Unofficial fork: do not auto-start Sparkle against upstream automaze feeds.
+        self.updaterController = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
         super.init()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Setup standard Edit menu for keyboard shortcuts (Cmd+C/V/X/A)
         setupMainMenu()
-        
-        // Setup menu bar
-        setupMenuBar()
 
         // Initialize managers
         serverManager = ServerManager()
@@ -40,6 +40,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         serverManager.onVercelConfigChanged = { [weak self] in
             self?.syncVercelConfig()
         }
+
+        popoverController = MenuBarPopoverController(
+            serverManager: serverManager,
+            authManager: authManager,
+            usageStore: usageStore,
+            thinkingProxy: thinkingProxy,
+            onOpenSettings: { [weak self] in self?.openSettings() },
+            onQuit: { [weak self] in self?.quit() }
+        )
+
+        // Setup menu bar popover
+        setupMenuBar()
+        usageStore.configure { [weak self] in
+            self?.authManager.serviceAccounts.mapValues { $0.accounts } ?? [:]
+        }
+        authManager.checkAuthStatus()
+        usageStore.clearCachedUsage()
+        usageStore.startAutoRefresh()
+        // Keep OAuth access tokens fresh (refresh ~15 minutes before expiry).
+        TokenRefreshService.startAutoRefresh()
         
         // Warm commonly used icons to avoid first-use disk hits
         preloadIcons()
@@ -76,7 +96,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             ("icon-inactive.png", statusIconSize),
             ("icon-codex.png", serviceIconSize),
             ("icon-claude.png", serviceIconSize),
-            ("icon-gemini.png", serviceIconSize)
+            ("icon-gemini.png", serviceIconSize),
+            ("icon-grok.png", serviceIconSize),
+            ("icon-kiro.png", serviceIconSize)
         ]
         
         for (name, size) in iconsToPreload {
@@ -107,9 +129,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         // App menu
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(NSMenuItem(title: "About VibeProxy", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem(title: "About VibeProxy Ultra", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(NSMenuItem(title: "Quit VibeProxy", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        appMenu.addItem(NSMenuItem(title: "Quit VibeProxy Ultra", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
         
@@ -135,59 +157,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
         if let button = statusItem.button {
             button.imagePosition = .imageOnly
-            button.toolTip = "VibeProxy"
+            button.toolTip = "VibeProxy Ultra — click for accounts & usage"
             if let icon = IconCatalog.shared.image(named: "icon-inactive.png", resizedTo: NSSize(width: 18, height: 18), template: true) {
                 button.image = icon
             } else {
-                let fallback = NSImage(systemSymbolName: "network.slash", accessibilityDescription: "VibeProxy")
+                let fallback = NSImage(systemSymbolName: "network.slash", accessibilityDescription: "VibeProxy Ultra")
                 fallback?.isTemplate = true
                 button.image = fallback
                 NSLog("[MenuBar] Failed to load inactive icon from bundle; using fallback system icon")
             }
         }
 
-        menu = NSMenu()
-
-        // Server Status
-        menu.addItem(NSMenuItem(title: "Server: Stopped", action: nil, keyEquivalent: ""))
-        menu.addItem(NSMenuItem.separator())
-
-        // Main Actions
-        menu.addItem(NSMenuItem(title: "Open Settings", action: #selector(openSettings), keyEquivalent: "s"))
-        menu.addItem(NSMenuItem.separator())
-
-        // Server Control
-        let startStopItem = NSMenuItem(title: "Start Server", action: #selector(toggleServer), keyEquivalent: "")
-        startStopItem.tag = 100
-        menu.addItem(startStopItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Copy URL
-        let copyURLItem = NSMenuItem(title: "Copy Server URL", action: #selector(copyServerURL), keyEquivalent: "c")
-        copyURLItem.isEnabled = false
-        copyURLItem.tag = 102
-        menu.addItem(copyURLItem)
-
-        // Open Dashboard
-        let dashboardItem = NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d")
-        dashboardItem.isEnabled = false
-        dashboardItem.tag = 103
-        menu.addItem(dashboardItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Check for Updates
-        let checkForUpdatesItem = NSMenuItem(title: "Check for Updates...", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "u")
-        checkForUpdatesItem.target = updaterController
-        menu.addItem(checkForUpdatesItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Quit
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
-
-        statusItem.menu = menu
+        popoverController.attach(to: statusItem)
     }
 
 
@@ -207,12 +188,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             backing: .buffered,
             defer: false
         )
-        window.title = "VibeProxy"
+        window.title = "VibeProxy Ultra"
         window.center()
         window.delegate = self
         window.isReleasedWhenClosed = false
 
-        let contentView = SettingsView(serverManager: serverManager)
+        let contentView = SettingsView(serverManager: serverManager, authManager: authManager)
         window.contentView = NSHostingView(rootView: contentView)
 
         settingsWindow = window
@@ -249,7 +230,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                     if success {
                         self?.updateMenuBarStatus()
                         // User always connects to 8317 (thinking proxy)
-                        self?.showNotification(title: "Server Started", body: "VibeProxy is now running")
+                        self?.showNotification(title: "Server Started", body: "VibeProxy Ultra is now running")
                     } else {
                         // Backend failed - stop the proxy to keep state consistent
                         self?.thinkingProxy.stop()
@@ -303,7 +284,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     @objc func handleAuthDirectoryChanged() {
         NSLog("[AppDelegate] Auth directory changed notification received — refreshing settings")
         serverManager.handleObservedConfigInputsChanged()
-        // Re-open settings window if it exists so the user sees the new account
+        authManager.checkAuthStatus()
+        Task {
+            await usageStore.refreshVisibleProviders(
+                from: ServiceType.allCases,
+                accounts: authManager.serviceAccounts.mapValues { $0.accounts }
+            )
+        }
         if let window = settingsWindow {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -311,24 +298,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     }
 
     @objc func updateMenuBarStatus() {
-        // Update status items
-        if let serverStatus = menu.item(at: 0) {
-            serverStatus.title = serverManager.isRunning ? "Server: Running (port \(thinkingProxy.proxyPort))" : "Server: Stopped"
-        }
-
-        // Update button states
-        if let startStopItem = menu.item(withTag: 100) {
-            startStopItem.title = serverManager.isRunning ? "Stop Server" : "Start Server"
-        }
-
-        if let copyURLItem = menu.item(withTag: 102) {
-            copyURLItem.isEnabled = serverManager.isRunning
-        }
-
-        if let dashboardItem = menu.item(withTag: 103) {
-            dashboardItem.isEnabled = serverManager.isRunning
-        }
-
         // Update icon based on server status
         if let button = statusItem.button {
             let iconName = serverManager.isRunning ? "icon-active.png" : "icon-inactive.png"
@@ -378,6 +347,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        TokenRefreshService.stopAutoRefresh()
+        usageStore.stopAutoRefresh()
         NotificationCenter.default.removeObserver(self, name: .serverStatusChanged, object: nil)
         NotificationCenter.default.removeObserver(self, name: .authDirectoryChanged, object: nil)
         pendingAuthRefresh?.cancel()

@@ -21,8 +21,20 @@ extension ServiceType {
             return .promptForQwenEmail
         case .antigravity:
             return .authCommand(.antigravityLogin)
+        case .kiro:
+            return .authCommand(.kiroLogin)
+        case .grok:
+            return .authCommand(.xaiLogin)
         case .zai:
             return .promptForZAIAPIKey
+        case .cursor:
+            return .authCommand(.cursorLogin)
+        case .codebuddy:
+            return .authCommand(.codebuddyLogin)
+        case .gitlab:
+            return .authCommand(.gitlabLogin)
+        case .kilo:
+            return .authCommand(.kiloLogin)
         }
     }
 }

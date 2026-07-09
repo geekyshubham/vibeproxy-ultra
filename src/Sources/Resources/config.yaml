@@ -45,3 +45,28 @@ quota-exceeded:
 
 # No API keys needed for OAuth-based providers
 generative-language-api-key: []
+
+# OpenAI-compatible providers (import API keys from configured local apps)
+openai-compatibility:
+  - name: opencode-go
+    display-name: OpenCode Go
+    base-url: https://opencode.ai/zen/go/v1
+    help-text: OpenCode Go subscription models via OpenCode Zen.
+    icon-system: terminal.fill
+    models:
+      - alias: glm-5.2
+        name: glm-5.2
+      - alias: glm-5.1
+        name: glm-5.1
+      - alias: kimi-k2.7-code
+        name: kimi-k2.7-code
+      - alias: kimi-k2.6
+        name: kimi-k2.6
+      - alias: deepseek-v4-pro
+        name: deepseek-v4-pro
+      - alias: deepseek-v4-flash
+        name: deepseek-v4-flash
+      - alias: qwen3.7-max
+        name: qwen3.7-max
+      - alias: qwen3.7-plus
+        name: qwen3.7-plus

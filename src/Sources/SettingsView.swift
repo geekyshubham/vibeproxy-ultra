@@ -221,21 +221,30 @@ struct ServiceRow<ExtraContent: View>: View {
                                     showingRemoveConfirmation = true
                                 }
                             }
-                            extraContent()
                         }
                         .padding(.top, 4)
                     }
+
+                    // Import buttons must stay visible even when the account list is collapsed.
+                    // Discovery also needs this mounted so onAppear/task can run for every provider.
+                    extraContent()
                 } else {
                     Text("No connected accounts")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.leading, 28)
+                    // Import section applies its own leading padding.
+                    extraContent()
                 }
-            } else if let disabledReasonText, !disabledReasonText.isEmpty {
-                Text(disabledReasonText)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.leading, 28)
+            } else {
+                // Provider off — still surface local import options so users can detect accounts.
+                extraContent()
+                if let disabledReasonText, !disabledReasonText.isEmpty {
+                    Text(disabledReasonText)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 28)
+                }
             }
         }
         .padding(.vertical, 4)
@@ -337,6 +346,9 @@ struct CustomProviderRow: View {
     let onToggleDisabled: (CustomProviderCredential) -> Void
     let onToggleEnabled: (Bool) -> Void
     var onExpandChange: ((Bool) -> Void)? = nil
+    var importableAccounts: [DiscoveredConfiguredAccount] = []
+    var isImporting: Bool = false
+    var onImport: ((DiscoveredConfiguredAccount) -> Void)? = nil
     
     @State private var isExpanded = false
     @State private var credentialToRemove: CustomProviderCredential?
@@ -412,6 +424,26 @@ struct CustomProviderRow: View {
                 }
             }
             
+            // Always show one-click import when local credentials exist (e.g. OpenCode Go).
+            if !importableAccounts.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(importableAccounts) { account in
+                        Button {
+                            onImport?(account)
+                        } label: {
+                            Label(
+                                "Import from \(account.sourceAppName)",
+                                systemImage: "square.and.arrow.down"
+                            )
+                            .font(.caption)
+                        }
+                        .controlSize(.small)
+                        .disabled(isImporting || isAuthenticating)
+                    }
+                }
+                .padding(.leading, 28)
+            }
+
             if isEnabled {
                 if totalConfiguredKeyCount > 0 {
                     HStack(spacing: 4) {
@@ -507,7 +539,7 @@ struct CustomProviderRow: View {
 
 struct SettingsView: View {
     @ObservedObject var serverManager: ServerManager
-    @StateObject private var authManager = AuthManager()
+    @ObservedObject var authManager: AuthManager
     @State private var launchAtLogin = false
     @State private var authenticatingService: ServiceType? = nil
     @State private var authenticatingCustomProviderID: String? = nil
@@ -535,7 +567,8 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
+            ScrollView {
+                Form {
                 Section {
                     HStack {
                         Text("Server status")
@@ -581,6 +614,14 @@ struct SettingsView: View {
                     }
                 }
 
+                ConfiguredAppsImportPanel(
+                    authManager: authManager,
+                    serverManager: serverManager,
+                    isImporting: authenticatingService != nil || authenticatingCustomProviderID != nil,
+                    onImport: { importConfiguredAccount($0) },
+                    onImportAll: { importAllConfiguredAccounts($0) }
+                )
+
                 Section("Services") {
                     ServiceRow(
                         serviceType: .antigravity,
@@ -599,7 +640,9 @@ struct SettingsView: View {
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("antigravity", enabled: enabled) },
                         onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
-                    ) { EmptyView() }
+                    ) {
+                        configuredImportSection(for: .antigravity)
+                    }
 
                     ServiceRow(
                         serviceType: .claude,
@@ -620,6 +663,7 @@ struct SettingsView: View {
                         onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
                     ) {
                         VercelGatewayControls(serverManager: serverManager)
+                        configuredImportSection(for: .claude)
                     }
 
                     ServiceRow(
@@ -639,7 +683,9 @@ struct SettingsView: View {
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("codex", enabled: enabled) },
                         onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
-                    ) { EmptyView() }
+                    ) {
+                        configuredImportSection(for: .codex)
+                    }
 
                     ServiceRow(
                         serviceType: .gemini,
@@ -658,7 +704,51 @@ struct SettingsView: View {
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("gemini", enabled: enabled) },
                         onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
-                    ) { EmptyView() }
+                    ) {
+                        configuredImportSection(for: .gemini)
+                    }
+
+                    ServiceRow(
+                        serviceType: .grok,
+                        iconName: "icon-grok.png",
+                        iconSystemName: "sparkle",
+                        accounts: authManager.accounts(for: .grok),
+                        isAuthenticating: authenticatingService == .grok,
+                        helpText: "Grok uses browser-based xAI OAuth so you can route requests through your Grok subscription instead of an API key.",
+                        isEnabled: serverManager.isProviderEnabled("xai"),
+                        isToggleLocked: serverManager.isProviderToggleLocked("xai"),
+                        toggleHelpText: serverManager.providerConfigLockReason("xai"),
+                        disabledReasonText: serverManager.providerConfigLockReason("xai"),
+                        customTitle: nil,
+                        onConnect: { connectService(.grok) },
+                        onDisconnect: { account in disconnectAccount(account) },
+                        onToggleDisabled: { account in toggleAccountDisabled(account) },
+                        onToggleEnabled: { enabled in serverManager.setProviderEnabled("xai", enabled: enabled) },
+                        onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
+                    ) {
+                        configuredImportSection(for: .grok)
+                    }
+
+                    ServiceRow(
+                        serviceType: .kiro,
+                        iconName: "icon-kiro.png",
+                        iconSystemName: "bolt.horizontal.circle.fill",
+                        accounts: authManager.accounts(for: .kiro),
+                        isAuthenticating: authenticatingService == .kiro,
+                        helpText: "Kiro uses Google OAuth by default. If you're already signed into Kiro IDE, import that session below.",
+                        isEnabled: serverManager.isProviderEnabled("kiro"),
+                        isToggleLocked: serverManager.isProviderToggleLocked("kiro"),
+                        toggleHelpText: serverManager.providerConfigLockReason("kiro"),
+                        disabledReasonText: serverManager.providerConfigLockReason("kiro"),
+                        customTitle: nil,
+                        onConnect: { connectService(.kiro) },
+                        onDisconnect: { account in disconnectAccount(account) },
+                        onToggleDisabled: { account in toggleAccountDisabled(account) },
+                        onToggleEnabled: { enabled in serverManager.setProviderEnabled("kiro", enabled: enabled) },
+                        onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
+                    ) {
+                        configuredImportSection(for: .kiro)
+                    }
 
                     ServiceRow(
                         serviceType: .kimi,
@@ -677,7 +767,9 @@ struct SettingsView: View {
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("kimi", enabled: enabled) },
                         onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
-                    ) { EmptyView() }
+                    ) {
+                        configuredImportSection(for: .kimi)
+                    }
 
                     ServiceRow(
                         serviceType: .copilot,
@@ -696,7 +788,9 @@ struct SettingsView: View {
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("github-copilot", enabled: enabled) },
                         onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
-                    ) { EmptyView() }
+                    ) {
+                        configuredImportSection(for: .copilot)
+                    }
 
                     ServiceRow(
                         serviceType: .qwen,
@@ -715,7 +809,9 @@ struct SettingsView: View {
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("qwen", enabled: enabled) },
                         onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
-                    ) { EmptyView() }
+                    ) {
+                        configuredImportSection(for: .qwen)
+                    }
 
                     ServiceRow(
                         serviceType: .zai,
@@ -734,7 +830,93 @@ struct SettingsView: View {
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("zai", enabled: enabled) },
                         onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
-                    ) { EmptyView() }
+                    ) {
+                        configuredImportSection(for: .zai)
+                    }
+
+                    ServiceRow(
+                        serviceType: .cursor,
+                        iconName: "icon-cursor.png",
+                        iconSystemName: "cursorarrow.click.2",
+                        accounts: authManager.accounts(for: .cursor),
+                        isAuthenticating: authenticatingService == .cursor,
+                        helpText: "Cursor OAuth via CLIProxy. Connect your Cursor subscription for proxied model access.",
+                        isEnabled: serverManager.isProviderEnabled("cursor"),
+                        isToggleLocked: serverManager.isProviderToggleLocked("cursor"),
+                        toggleHelpText: serverManager.providerConfigLockReason("cursor"),
+                        disabledReasonText: serverManager.providerConfigLockReason("cursor"),
+                        customTitle: nil,
+                        onConnect: { connectService(.cursor) },
+                        onDisconnect: { account in disconnectAccount(account) },
+                        onToggleDisabled: { account in toggleAccountDisabled(account) },
+                        onToggleEnabled: { enabled in serverManager.setProviderEnabled("cursor", enabled: enabled) },
+                        onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
+                    ) {
+                        configuredImportSection(for: .cursor)
+                    }
+
+                    ServiceRow(
+                        serviceType: .codebuddy,
+                        iconName: "icon-codebuddy.png",
+                        iconSystemName: "person.2.wave.2.fill",
+                        accounts: authManager.accounts(for: .codebuddy),
+                        isAuthenticating: authenticatingService == .codebuddy,
+                        helpText: "CodeBuddy browser OAuth (Tencent coding assistant).",
+                        isEnabled: serverManager.isProviderEnabled("codebuddy"),
+                        isToggleLocked: serverManager.isProviderToggleLocked("codebuddy"),
+                        toggleHelpText: serverManager.providerConfigLockReason("codebuddy"),
+                        disabledReasonText: serverManager.providerConfigLockReason("codebuddy"),
+                        customTitle: nil,
+                        onConnect: { connectService(.codebuddy) },
+                        onDisconnect: { account in disconnectAccount(account) },
+                        onToggleDisabled: { account in toggleAccountDisabled(account) },
+                        onToggleEnabled: { enabled in serverManager.setProviderEnabled("codebuddy", enabled: enabled) },
+                        onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
+                    ) {
+                        configuredImportSection(for: .codebuddy)
+                    }
+
+                    ServiceRow(
+                        serviceType: .gitlab,
+                        iconName: "icon-gitlab.png",
+                        iconSystemName: "chevron.left.forwardslash.chevron.right",
+                        accounts: authManager.accounts(for: .gitlab),
+                        isAuthenticating: authenticatingService == .gitlab,
+                        helpText: "GitLab Duo OAuth for Duo Chat models via CLIProxy.",
+                        isEnabled: serverManager.isProviderEnabled("gitlab"),
+                        isToggleLocked: serverManager.isProviderToggleLocked("gitlab"),
+                        toggleHelpText: serverManager.providerConfigLockReason("gitlab"),
+                        disabledReasonText: serverManager.providerConfigLockReason("gitlab"),
+                        customTitle: nil,
+                        onConnect: { connectService(.gitlab) },
+                        onDisconnect: { account in disconnectAccount(account) },
+                        onToggleDisabled: { account in toggleAccountDisabled(account) },
+                        onToggleEnabled: { enabled in serverManager.setProviderEnabled("gitlab", enabled: enabled) },
+                        onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
+                    ) {
+                        configuredImportSection(for: .gitlab)
+                    }
+
+                    ServiceRow(
+                        serviceType: .kilo,
+                        iconName: "icon-kilo.png",
+                        iconSystemName: "scalemass.fill",
+                        accounts: authManager.accounts(for: .kilo),
+                        isAuthenticating: authenticatingService == .kilo,
+                        helpText: "Kilo AI device-flow login via CLIProxy.",
+                        isEnabled: serverManager.isProviderEnabled("kilo"),
+                        isToggleLocked: serverManager.isProviderToggleLocked("kilo"),
+                        toggleHelpText: serverManager.providerConfigLockReason("kilo"),
+                        disabledReasonText: serverManager.providerConfigLockReason("kilo"),
+                        customTitle: nil,
+                        onConnect: { connectService(.kilo) },
+                        onDisconnect: { account in disconnectAccount(account) },
+                        onToggleDisabled: { account in toggleAccountDisabled(account) },
+                        onToggleEnabled: { enabled in serverManager.setProviderEnabled("kilo", enabled: enabled) },
+                        onExpandChange: { expanded in expandedRowCount += expanded ? 1 : -1 }
+                    ) {
+                        configuredImportSection(for: .kilo)
+                    }
                 }
                 
                 if !serverManager.customProviders.isEmpty {
@@ -760,14 +942,18 @@ struct SettingsView: View {
                                 },
                                 onExpandChange: { expanded in
                                     expandedRowCount += expanded ? 1 : -1
-                                }
+                                },
+                                importableAccounts: importableAccounts(forCustomProvider: provider.id),
+                                isImporting: authenticatingCustomProviderID == provider.id,
+                                onImport: { importConfiguredAccount($0) }
                             )
                         }
                     }
                 }
+                }
+                .formStyle(.grouped)
+                .padding(.bottom, 8)
             }
-            .formStyle(.grouped)
-            .scrollDisabled(expandedRowCount == 0)
 
             Spacer()
                 .frame(height: 6)
@@ -775,7 +961,7 @@ struct SettingsView: View {
             // Footer
             VStack(spacing: 4) {
                 HStack(spacing: 4) {
-                    Text("VibeProxy \(appVersion) was made possible thanks to")
+                    Text("VibeProxy Ultra \(appVersion) — unofficial fork, built on")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Link("CLIProxyAPIPlus", destination: URL(string: "https://github.com/router-for-me/CLIProxyAPIPlus")!)
@@ -785,31 +971,28 @@ struct SettingsView: View {
                         .onHover { inside in
                             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                         }
-                    Text("|")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Text("License: MIT")
+                    Text("| MIT")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
 
                 HStack(spacing: 4) {
-                    Text("© 2026")
+                    Text("Based on")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Link("Automaze, Ltd.", destination: URL(string: "https://automaze.io")!)
+                    Link("VibeProxy", destination: URL(string: "https://github.com/automazeio/vibeproxy")!)
                         .font(.caption)
                         .underline()
                         .foregroundColor(.secondary)
                         .onHover { inside in
                             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                         }
-                    Text("All rights reserved.")
+                    Text("by Automaze · Ultra © 2026 Geekyshubham")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
 
-                Link("Report an issue", destination: URL(string: "https://github.com/automazeio/vibeproxy/issues")!)
+                Link("Report an issue", destination: URL(string: "https://github.com/Geekyshubham/vibeproxy-ultra/issues")!)
                     .font(.caption)
                     .padding(.top, 6)
                     .onHover { inside in
@@ -818,7 +1001,7 @@ struct SettingsView: View {
             }
             .padding(.bottom, 12)
         }
-        .frame(width: 480, height: 740)
+        .frame(minWidth: 480, idealWidth: 520, minHeight: 520)
         .sheet(isPresented: $showingQwenEmailPrompt) {
             VStack(spacing: 16) {
                 Text("Qwen Account Email")
@@ -1012,9 +1195,231 @@ struct SettingsView: View {
             return "🌐 Browser opened for Qwen authentication.\n\nPlease complete the login in your browser."
         case .antigravity:
             return "🌐 Browser opened for Antigravity authentication.\n\nPlease complete the login in your browser."
+        case .kiro:
+            return "🌐 Browser opened for Kiro authentication.\n\nPlease complete the login in your browser.\n\nThe app will automatically detect your Kiro account."
+        case .grok:
+            return "🌐 Browser opened for Grok authentication.\n\nPlease complete the login in your browser.\n\nThe app will automatically detect your xAI account."
         case .zai:
             return "✓ Z.AI API key added successfully.\n\nYou can now use GLM models through the proxy."
+        case .cursor:
+            return "🌐 Browser opened for Cursor authentication.\n\nPlease complete the login in your browser."
+        case .codebuddy:
+            return "🌐 Browser opened for CodeBuddy authentication.\n\nPlease complete the login in your browser."
+        case .gitlab:
+            return "🌐 Browser opened for GitLab Duo authentication.\n\nPlease complete the login in your browser."
+        case .kilo:
+            return "🌐 Kilo AI device-flow authentication started.\n\nFollow the on-screen code instructions."
         }
+    }
+
+    @ViewBuilder
+    private func configuredImportSection(for serviceType: ServiceType) -> some View {
+        ConfiguredAccountImportSection(
+            serviceType: serviceType,
+            connectedAccounts: authManager.accounts(for: serviceType),
+            zaiAPIKeys: serverManager.activeZaiAPIKeys,
+            customCredentials: serverManager.customProviderCredentials,
+            isImporting: authenticatingService == serviceType
+                || (serviceType == .zai && authenticatingCustomProviderID != nil),
+            onImport: { importConfiguredAccount($0) }
+        )
+    }
+
+    private func importableAccounts(forCustomProvider providerID: String) -> [DiscoveredConfiguredAccount] {
+        ConfiguredAccountDiscovery.discoverOpenCodeCustomProviders().filter { account in
+            account.customProviderID == providerID
+                && !ConfiguredAccountDiscovery.isAlreadyConnected(
+                    account,
+                    existingAccounts: [],
+                    zaiAPIKeys: serverManager.activeZaiAPIKeys,
+                    customCredentials: serverManager.customProviderCredentials
+                )
+        }
+    }
+
+    private func importConfiguredAccount(_ account: DiscoveredConfiguredAccount) {
+        if account.customProviderID != nil {
+            importCustomProviderAccount(account)
+            return
+        }
+
+        authenticatingService = account.serviceType
+        NSLog("[SettingsView] Importing %@ from %@", account.displayName, account.sourceAppName)
+
+        if account.importKind == .kiroIDE {
+            serverManager.runAuthCommand(.kiroImport) { success, output in
+                NSLog("[SettingsView] Kiro import completed - success: %d, output: %@", success, output)
+                DispatchQueue.main.async {
+                    self.authenticatingService = nil
+                    if success {
+                        self.authResultSuccess = true
+                        self.authResultMessage = "✓ Imported Kiro credentials from Kiro IDE.\n\nMake sure you were signed into Kiro IDE first."
+                        self.showingAuthResult = true
+                        self.authManager.checkAuthStatus()
+                        self.serverManager.refreshAuthBackedConfiguration()
+                    } else {
+                        self.authResultSuccess = false
+                        self.authResultMessage = "Kiro import failed. Sign into Kiro IDE first, then try again.\n\nDetails: \(output.isEmpty ? "No output from import process" : output)"
+                        self.showingAuthResult = true
+                    }
+                }
+            }
+            return
+        }
+
+        if case let .zaiAPIKey(apiKey) = account.importKind {
+            authenticatingService = .zai
+            serverManager.saveZaiApiKey(apiKey) { success, output in
+                DispatchQueue.main.async {
+                    self.authenticatingService = nil
+                    self.finishImportResult(
+                        success: success,
+                        account: account,
+                        successMessage: success ? "✓ Imported \(account.displayName) from \(account.sourceAppName)" : nil,
+                        failureMessage: success ? nil : output
+                    )
+                }
+            }
+            return
+        }
+
+        let result = ConfiguredAccountImporter.importAccount(account)
+        authenticatingService = nil
+        finishConfiguredImportResult(result, account: account)
+    }
+
+    private func importCustomProviderAccount(_ account: DiscoveredConfiguredAccount) {
+        guard case let .opencodeGo(apiKey) = account.importKind,
+              let providerID = account.customProviderID
+        else { return }
+
+        authenticatingCustomProviderID = providerID
+        serverManager.saveCustomProviderAPIKey(providerID: providerID, apiKey: apiKey) { success, output in
+            DispatchQueue.main.async {
+                self.authenticatingCustomProviderID = nil
+                self.finishImportResult(
+                    success: success,
+                    account: account,
+                    successMessage: success ? "✓ Imported \(account.displayName) from \(account.sourceAppName)" : nil,
+                    failureMessage: success ? nil : output
+                )
+            }
+        }
+    }
+
+    private func importAllConfiguredAccounts(_ accounts: [DiscoveredConfiguredAccount]) {
+        guard !accounts.isEmpty else { return }
+
+        var remaining = accounts
+        var successes: [String] = []
+        var failures: [String] = []
+
+        func importNext() {
+            guard let account = remaining.first else {
+                authenticatingService = nil
+                authenticatingCustomProviderID = nil
+                authResultSuccess = failures.isEmpty
+                if failures.isEmpty {
+                    authResultMessage = "✓ Imported \(successes.count) configured account\(successes.count == 1 ? "" : "s")."
+                } else {
+                    authResultMessage = "Imported \(successes.count) account\(successes.count == 1 ? "" : "s"). \(failures.count) failed.\n\n" + failures.joined(separator: "\n")
+                }
+                showingAuthResult = true
+                authManager.checkAuthStatus()
+                serverManager.refreshAuthBackedConfiguration()
+                return
+            }
+
+            remaining.removeFirst()
+
+            if account.customProviderID != nil {
+                guard case let .opencodeGo(apiKey) = account.importKind,
+                      let providerID = account.customProviderID
+                else {
+                    importNext()
+                    return
+                }
+                authenticatingCustomProviderID = providerID
+                serverManager.saveCustomProviderAPIKey(providerID: providerID, apiKey: apiKey) { success, output in
+                    DispatchQueue.main.async {
+                        if success {
+                            successes.append(account.displayName)
+                        } else {
+                            failures.append("\(account.displayName): \(output)")
+                        }
+                        importNext()
+                    }
+                }
+                return
+            }
+
+            if account.importKind == .kiroIDE {
+                authenticatingService = .kiro
+                serverManager.runAuthCommand(.kiroImport) { success, output in
+                    DispatchQueue.main.async {
+                        if success {
+                            successes.append(account.displayName)
+                        } else {
+                            failures.append("\(account.displayName): \(output.isEmpty ? "Kiro import failed" : output)")
+                        }
+                        importNext()
+                    }
+                }
+                return
+            }
+
+            if case let .zaiAPIKey(apiKey) = account.importKind {
+                authenticatingService = .zai
+                serverManager.saveZaiApiKey(apiKey) { success, output in
+                    DispatchQueue.main.async {
+                        if success {
+                            successes.append(account.displayName)
+                        } else {
+                            failures.append("\(account.displayName): \(output)")
+                        }
+                        importNext()
+                    }
+                }
+                return
+            }
+
+            let result = ConfiguredAccountImporter.importAccount(account)
+            switch result {
+            case .success:
+                successes.append(account.displayName)
+            case .failure(let message):
+                failures.append("\(account.displayName): \(message)")
+            }
+            importNext()
+        }
+
+        importNext()
+    }
+
+    private func finishConfiguredImportResult(_ result: ConfiguredAccountImportResult, account: DiscoveredConfiguredAccount) {
+        switch result {
+        case .success(let message):
+            finishImportResult(success: true, account: account, successMessage: "✓ \(message)", failureMessage: nil)
+        case .failure(let message):
+            finishImportResult(success: false, account: account, successMessage: nil, failureMessage: message)
+        }
+    }
+
+    private func finishImportResult(
+        success: Bool,
+        account: DiscoveredConfiguredAccount,
+        successMessage: String?,
+        failureMessage: String?
+    ) {
+        authResultSuccess = success
+        if success, let successMessage {
+            authResultMessage = successMessage
+        } else {
+            authResultMessage = "Import failed for \(account.displayName).\n\nDetails: \(failureMessage ?? "Unknown error")"
+        }
+        showingAuthResult = true
+        authManager.checkAuthStatus()
+        serverManager.refreshAuthBackedConfiguration()
     }
     
     private func startQwenAuth(email: String) {
