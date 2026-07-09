@@ -308,7 +308,7 @@ jobs:
                 <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
                 <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
                 <pubDate>${TODAY}</pubDate>
-                <enclosure url="https://github.com/automazeio/vibeproxy/releases/download/v${VERSION}/VibeProxy-arm64.zip"
+                <enclosure url="https://github.com/Geekyshubham/vibeproxy-ultra/releases/download/v${VERSION}/VibeProxy-arm64.zip"
                            type="application/octet-stream"
                            sparkle:edSignature="${ARM64_SIGNATURE}"
                            length="${ARM64_LENGTH}"/>
@@ -327,9 +327,9 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
             <channel>
-              <title>VibeProxy Updates (Intel)</title>
-              <link>https://github.com/automazeio/vibeproxy</link>
-              <description>Most recent updates to VibeProxy for Intel Macs</description>
+              <title>VibeProxy Ultra Updates (Intel)</title>
+              <link>https://github.com/Geekyshubham/vibeproxy-ultra/releases</link>
+              <description>Most recent updates to VibeProxy Ultra for Intel Macs</description>
               <language>en</language>
             </channel>
           </rss>
@@ -344,7 +344,7 @@ jobs:
                 <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
                 <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
                 <pubDate>${TODAY}</pubDate>
-                <enclosure url="https://github.com/automazeio/vibeproxy/releases/download/v${VERSION}/VibeProxy-x86_64.zip"
+                <enclosure url="https://github.com/Geekyshubham/vibeproxy-ultra/releases/download/v${VERSION}/VibeProxy-x86_64.zip"
                            type="application/octet-stream"
                            sparkle:edSignature="${X86_64_SIGNATURE}"
                            length="${X86_64_LENGTH}"/>
@@ -386,27 +386,25 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body: |
-            ## VibeProxy ${{ steps.get_version.outputs.VERSION }}
+            ## VibeProxy Ultra ${{ steps.get_version.outputs.VERSION }}
 
             ### Downloads
 
             | Architecture | DMG | ZIP |
             |--------------|-----|-----|
-            | **Apple Silicon** (M1/M2/M3) | `VibeProxy-arm64.dmg` | `VibeProxy-arm64.zip` |
-            | **Intel** (x86_64) ⚠️ | `VibeProxy-x86_64.dmg` | `VibeProxy-x86_64.zip` |
-
-            > ⚠️ **Intel build is untested** - Please report if it works for you!
+            | **Apple Silicon** (M1/M2/M3/M4) | `VibeProxy-arm64.dmg` | `VibeProxy-arm64.zip` |
+            | **Intel** (x86_64) | `VibeProxy-x86_64.dmg` | `VibeProxy-x86_64.zip` |
 
             ### Installation
 
             1. Download the appropriate file for your Mac
             2. For DMG: Mount and drag to Applications
             3. For ZIP: Extract and drag to Applications
-            4. Double-click to launch
+            4. Double-click to launch (Right-click → Open if Gatekeeper blocks)
 
             ### What's New
 
-            See the [CHANGELOG](https://github.com/automazeio/vibeproxy/blob/main/CHANGELOG.md) for details.
+            See the [CHANGELOG](https://github.com/Geekyshubham/vibeproxy-ultra/blob/main/CHANGELOG.md) for details.
 
             ### Verification
 

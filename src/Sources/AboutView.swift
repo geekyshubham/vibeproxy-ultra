@@ -142,17 +142,16 @@ struct AboutView: View {
         }
     }
 
-    // MARK: - SEO-aligned product copy (keep in sync with GitHub About + README)
+    // MARK: - Product copy
 
-    /// Primary one-liner — matches GitHub repository About.
     static let tagline =
-        "VibeProxy Ultra — unofficial enhanced fork of automazeio/vibeproxy (MIT). Not affiliated with Automaze."
+        "VibeProxy Ultra — macOS menu bar proxy with live AI usage limits, quotas, and analytics."
 
     static let summary =
-        "The enhanced VibeProxy for macOS: menu bar proxy for Claude Code, ChatGPT/Codex, Gemini, Antigravity, GitHub Copilot, Kiro, Grok, Z.AI, and more — with live usage limits, quota analytics, account switching, and session reliability the stock VibeProxy build does not ship."
+        "Route Claude Code, ChatGPT/Codex, Gemini, Antigravity, GitHub Copilot, Kiro, Grok, Z.AI, OpenCode, and more through a local proxy — with live usage limits, credit/token analytics, account switching, and session keep-alive."
 
     static let attribution =
-        "Based on the MIT-licensed VibeProxy project (automazeio/vibeproxy). VibeProxy Ultra is an independent, unofficial enhanced fork by Geekyshubham. Not affiliated with Automaze, Ltd., OpenAI, Anthropic, Google, xAI, or any AI provider. Use at your own risk regarding provider terms of service."
+        "© 2026 Geekyshubham · VibeProxy Ultra · MIT License. Not affiliated with OpenAI, Anthropic, Google, xAI, GitHub, or any AI provider. Use at your own risk regarding provider terms of service."
 }
 
 // MARK: - Presenter

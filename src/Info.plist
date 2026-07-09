@@ -29,9 +29,9 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>VibeProxy Ultra — unofficial enhanced fork of automazeio/vibeproxy (MIT). Not affiliated with Automaze. © 2026 Geekyshubham.</string>
+    <string>Copyright © 2026 Geekyshubham. VibeProxy Ultra.</string>
     <key>CFBundleGetInfoString</key>
-    <string>VibeProxy Ultra: macOS menu bar AI proxy with live usage limits for Claude Code, Codex, Gemini, Kiro. Enhanced unofficial fork of VibeProxy (MIT).</string>
+    <string>VibeProxy Ultra — macOS menu bar AI proxy with live usage limits for Claude Code, Codex, Gemini, Kiro, and more.</string>
     <!-- Sparkle feed left empty — Ultra does not auto-update from third-party feeds. -->
     <key>SUFeedURL</key>
     <string></string>

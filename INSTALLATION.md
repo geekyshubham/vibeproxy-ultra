@@ -1,32 +1,24 @@
 # Installing VibeProxy Ultra
 
-**VibeProxy Ultra** is the enhanced unofficial fork of [automazeio/vibeproxy](https://github.com/automazeio/vibeproxy) (MIT). Not affiliated with Automaze.
+**Requirements:** macOS 13+ · Apple Silicon *or* Intel builds on Releases.
 
-**Requirements:** macOS 13+ · **Apple Silicon** *or* **Intel** builds available on Releases.
+## Option 1: Download Pre-built (Recommended)
 
-## Option 1: Download Pre-built Release (Recommended)
-
-### Step 1: Download
-
-1. Go to **[Geekyshubham/vibeproxy-ultra Releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)**
+1. Open **[Geekyshubham/vibeproxy-ultra Releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)**
 2. Download for your Mac:
    - Apple Silicon: `VibeProxy-arm64.dmg` or `VibeProxy-arm64.zip`
    - Intel: `VibeProxy-x86_64.dmg` or `VibeProxy-x86_64.zip`
-3. Optional: verify `*.sha256` with `shasum -a 256 -c …`
+3. Optional: `shasum -a 256 -c VibeProxy-arm64.zip.sha256`
 
-### Step 2: Install
+### Install
 
-**ZIP:**
-1. Extract and drag `VibeProxy.app` to `/Applications`
-2. Launch (Right-click → Open if Gatekeeper blocks)
+**ZIP:** extract → drag `VibeProxy.app` to `/Applications` → launch  
 
-**DMG:**
-1. Open the DMG → drag `VibeProxy.app` to Applications
-2. Eject DMG → launch from Applications
+**DMG:** open → drag to Applications → eject → launch  
 
-### Step 3: Gatekeeper
+### Gatekeeper
 
-Ultra releases are **ad-hoc signed** (not Apple Developer ID notarized).
+Releases are **ad-hoc signed**:
 
 ```bash
 xattr -cr /Applications/VibeProxy.app
@@ -34,20 +26,13 @@ xattr -cr /Applications/VibeProxy.app
 xattr -cr "/Applications/VibeProxy Ultra.app"
 ```
 
-Or: **Right-click → Open → Open**.
+Or **Right-click → Open → Open**.
 
 ---
 
 ## Option 2: Build from Source
 
-### Prerequisites
-
-- macOS 13.0 (Ventura) or later
-- Swift 5.9+
-- Xcode Command Line Tools
-- Git
-
-### Build
+- macOS 13.0+ · Swift 5.9+ · Xcode Command Line Tools · Git
 
 ```bash
 git clone https://github.com/Geekyshubham/vibeproxy-ultra.git
@@ -67,16 +52,15 @@ APP_VERSION=1.1.0 ./scripts/build-release-artifacts.sh
 
 ## After install
 
-1. Click the menu bar icon → **Settings**
-2. Connect Claude Code, Codex, Gemini, Kiro, Copilot, etc.
-3. Watch **usage limits**, **analytics**, and **status** in the Ultra popover
+1. Menu bar icon → **Settings**  
+2. Connect providers (Claude Code, Codex, Gemini, Kiro, Copilot, …)  
+3. Use **usage limits**, **analytics**, and **status** in the popover  
 
 ---
 
 ## Support
 
-- Issues: [github.com/Geekyshubham/vibeproxy-ultra/issues](https://github.com/Geekyshubham/vibeproxy-ultra/issues)
+- Issues: [github.com/Geekyshubham/vibeproxy-ultra/issues](https://github.com/Geekyshubham/vibeproxy-ultra/issues)  
 - Releases: [github.com/Geekyshubham/vibeproxy-ultra/releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)
-- Upstream VibeProxy (original): [automazeio/vibeproxy](https://github.com/automazeio/vibeproxy)
 
-**VibeProxy Ultra — unofficial enhanced fork of automazeio/vibeproxy (MIT). Not affiliated with Automaze.**
+© 2026 Geekyshubham · VibeProxy Ultra · MIT
