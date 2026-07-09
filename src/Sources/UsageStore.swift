@@ -3,13 +3,19 @@ import Foundation
 final class UsageStore: ObservableObject {
     @Published private(set) var usageByAccountID: [String: ProviderUsageSnapshot] = [:]
     @Published private(set) var costByProvider: [String: ProviderCostSnapshot] = [:]
+    @Published private(set) var providerStatuses: [ProviderStatusSnapshot] = []
+    @Published private(set) var analytics: AnalyticsOverview?
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isRefreshingStatus = false
     @Published private(set) var lastRefreshAt: Date?
+    @Published private(set) var lastStatusRefreshAt: Date?
     /// Account IDs still waiting on a network usage response.
     @Published private(set) var pendingAccountIDs: Set<String> = []
 
     private var refreshTask: Task<Void, Never>?
+    private var statusTask: Task<Void, Never>?
     private var timer: Timer?
+    private var statusTimer: Timer?
     private var accountsProvider: () -> [ServiceType: [AuthAccount]] = { [:] }
     private var refreshGeneration: UInt64 = 0
 
@@ -17,26 +23,110 @@ final class UsageStore: ObservableObject {
         self.accountsProvider = accountsProvider
     }
 
-    func startAutoRefresh(interval: TimeInterval = 90) {
+    /// Last time we ran the expensive local session/cost filesystem scan.
+    private var lastCostScanAt: Date?
+    private let costScanMinInterval: TimeInterval = 15 * 60
+
+    func startAutoRefresh(immediate: Bool = true) {
+        let interval = AppSettings.shared.usageRefreshInterval
+        let statusInterval = AppSettings.shared.statusRefreshInterval
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        // Interval is user-configurable (default 3 min). 90s was thrashing CPU with full re-fetches.
+        let usageTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { await self.refreshVisibleProviders(from: ServiceType.allCases, accounts: self.accountsProvider()) }
         }
+        // Tolerance lets macOS coalesce timers → fewer wakeups, lower idle CPU.
+        usageTimer.tolerance = interval * 0.2
+        timer = usageTimer
+
+        statusTimer?.invalidate()
+        let stTimer = Timer.scheduledTimer(withTimeInterval: statusInterval, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.refreshStatus() }
+        }
+        stTimer.tolerance = statusInterval * 0.2
+        statusTimer = stTimer
+
+        guard immediate else { return }
         // Don't block the caller on the first full sweep — results stream in.
         Task { await refreshVisibleProviders(from: ServiceType.allCases, accounts: accountsProvider()) }
+        Task { await refreshStatus() }
+    }
+
+    /// Re-schedule timers after the user changes refresh cadence (no immediate refresh burst).
+    func applyRefreshSettings() {
+        startAutoRefresh(immediate: false)
     }
 
     func stopAutoRefresh() {
         timer?.invalidate()
         timer = nil
+        statusTimer?.invalidate()
+        statusTimer = nil
         refreshTask?.cancel()
+        statusTask?.cancel()
+    }
+
+    func refreshStatus() async {
+        statusTask?.cancel()
+        await MainActor.run { isRefreshingStatus = true }
+
+        let accounts = accountsProvider()
+        // Only providers that currently have at least one account.
+        let connected = Set(accounts.compactMap { type, list -> ServiceType? in
+            list.isEmpty ? nil : type
+        })
+
+        var credentials = ProviderStatusService.ProbeCredentials()
+        // Collect Grok/xAI OAuth tokens for authenticated health checks (never logged).
+        if let grokAccounts = accounts[.grok] {
+            var tokens: [String] = []
+            for account in grokAccounts where !account.isDisabled {
+                if let payload = NativeUsageFetcher.readAuthPayload(at: account.filePath),
+                   let token = payload["access_token"] as? String,
+                   !token.isEmpty
+                {
+                    tokens.append(token)
+                }
+            }
+            if !tokens.isEmpty {
+                credentials.accessTokensBySourceKey["grok"] = tokens
+            }
+        }
+
+        statusTask = Task { [weak self] in
+            let statuses = await ProviderStatusService.fetch(
+                forConnected: connected,
+                credentials: credentials
+            )
+            guard !Task.isCancelled, let self else { return }
+            await MainActor.run {
+                self.providerStatuses = statuses
+                self.isRefreshingStatus = false
+                self.lastStatusRefreshAt = Date()
+            }
+        }
+        await statusTask?.value
+    }
+
+    /// Operational status for a given Ultra provider (Overview dots).
+    func statusLevel(for serviceType: ServiceType) -> ProviderStatusLevel? {
+        providerStatuses.first { $0.serviceTypes.contains(serviceType) }?.level
+    }
+
+    func statusSnapshot(for serviceType: ServiceType) -> ProviderStatusSnapshot? {
+        providerStatuses.first { $0.serviceTypes.contains(serviceType) }
     }
 
     /// Concurrently fetch usage for every visible account.
     /// Each account is published to the UI as soon as its API response arrives
     /// (fast providers appear first; slow ones keep showing a spinner).
     func refreshVisibleProviders(from serviceTypes: [ServiceType], accounts: [ServiceType: [AuthAccount]] = [:]) async {
+        // Avoid overlapping full sweeps (timer + manual refresh + onAppear).
+        if isRefreshing {
+            return
+        }
         refreshTask?.cancel()
         refreshGeneration &+= 1
         let generation = refreshGeneration
@@ -109,21 +199,33 @@ final class UsageStore: ObservableObject {
                     }
                 }
 
-                // Cost scans are independent; publish as each provider finishes.
-                var costProviderIDs = Set<String>()
-                for (type, _) in targets {
-                    guard let providerID = type.usageProviderID,
-                          costProviderIDs.insert(providerID).inserted
-                    else { continue }
-                    let serviceType = type
-                    group.addTask {
-                        let cost = await NativeUsageFetcher.fetchCost(for: serviceType)
-                        guard !Task.isCancelled else { return }
-                        await self.publishCost(cost, providerID: providerID, generation: generation)
-                    }
-                }
-
                 await group.waitForAll()
+            }
+
+            // Expensive local JSONL scans (Codex/Claude trees) — throttle hard.
+            // This was the main CPU hog when run on every 90s refresh for every provider.
+            let shouldScanCosts: Bool = await MainActor.run {
+                if let last = self.lastCostScanAt,
+                   Date().timeIntervalSince(last) < self.costScanMinInterval
+                {
+                    return false
+                }
+                return true
+            }
+            if shouldScanCosts {
+                let historyDays = await MainActor.run { AppSettings.shared.analyticsHistoryDays }
+                let allCosts = await Task.detached(priority: .utility) {
+                    LocalTokenCostScanner.allProviderSnapshots(historyDays: historyDays)
+                }.value
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard generation == self.refreshGeneration else { return }
+                    for cost in allCosts {
+                        self.costByProvider[cost.providerID] = cost
+                    }
+                    self.analytics = AnalyticsEngine.overview(from: Array(self.costByProvider.values))
+                    self.lastCostScanAt = Date()
+                }
             }
 
             guard !Task.isCancelled else { return }
@@ -153,9 +255,19 @@ final class UsageStore: ObservableObject {
     func clearCachedUsage() {
         usageByAccountID = [:]
         costByProvider = [:]
+        analytics = nil
         lastRefreshAt = nil
         pendingAccountIDs = []
         isRefreshing = false
+    }
+
+    /// Worst status level among tracked providers (for menu header badge).
+    var overallStatusLevel: ProviderStatusLevel {
+        providerStatuses.map(\.level).min(by: { $0.sortRank < $1.sortRank }) ?? .unknown
+    }
+
+    var activeIncidentCount: Int {
+        providerStatuses.reduce(0) { $0 + $1.incidents.count }
     }
 
     // MARK: - Streaming publishes
@@ -177,40 +289,68 @@ final class UsageStore: ObservableObject {
         guard generation == refreshGeneration else { return }
         if let cost {
             costByProvider[providerID] = cost
+            analytics = AnalyticsEngine.overview(from: Array(costByProvider.values))
+        }
+    }
+
+    private func enrichWindows(_ windows: [RateWindow]) -> [RateWindow] {
+        windows.map { window in
+            guard let resetsAt = window.resetsAt else { return window }
+            if let existing = window.resetDescription, !existing.isEmpty { return window }
+            return RateWindow(
+                usedPercent: window.usedPercent,
+                windowMinutes: window.windowMinutes,
+                resetsAt: resetsAt,
+                resetDescription: ResetCountdownFormatter.resetLine(for: resetsAt),
+                label: window.label,
+                remainingValue: window.remainingValue,
+                totalValue: window.totalValue,
+                unitLabel: window.unitLabel,
+                displayStyle: window.displayStyle
+            )
         }
     }
 
     private func sanitize(_ snapshot: ProviderUsageSnapshot) -> ProviderUsageSnapshot {
+        let windows = enrichWindows(snapshot.windows)
+        let subAccounts = snapshot.subAccounts.map { sub in
+            ProviderUsageSubAccount(
+                id: sub.id,
+                title: sub.title,
+                subtitle: sub.subtitle,
+                planType: sub.planType,
+                windows: enrichWindows(sub.windows),
+                errorMessage: sub.errorMessage
+            )
+        }
+
         guard let message = snapshot.errorMessage?.lowercased(),
               (message.contains("install") && message.contains("usage"))
                 || message.contains("cli not found")
                 || message.contains("command not found")
         else {
             // Ensure completed snapshots are not stuck in refreshing UI state.
-            if snapshot.isRefreshing {
-                return ProviderUsageSnapshot(
-                    id: snapshot.id,
-                    providerID: snapshot.providerID,
-                    source: snapshot.source,
-                    windows: snapshot.windows,
-                    subAccounts: snapshot.subAccounts,
-                    accountEmail: snapshot.accountEmail,
-                    planType: snapshot.planType,
-                    planLabel: snapshot.planLabel,
-                    updatedAt: snapshot.updatedAt ?? Date(),
-                    errorMessage: snapshot.errorMessage,
-                    isRefreshing: false
-                )
-            }
-            return snapshot
+            return ProviderUsageSnapshot(
+                id: snapshot.id,
+                providerID: snapshot.providerID,
+                source: snapshot.source,
+                windows: windows,
+                subAccounts: subAccounts,
+                accountEmail: snapshot.accountEmail,
+                planType: snapshot.planType,
+                planLabel: snapshot.planLabel,
+                updatedAt: snapshot.updatedAt ?? Date(),
+                errorMessage: snapshot.errorMessage,
+                isRefreshing: false
+            )
         }
 
         return ProviderUsageSnapshot(
             id: snapshot.id,
             providerID: snapshot.providerID,
             source: snapshot.source,
-            windows: snapshot.windows,
-            subAccounts: snapshot.subAccounts,
+            windows: windows,
+            subAccounts: subAccounts,
             accountEmail: snapshot.accountEmail,
             planType: snapshot.planType,
             planLabel: snapshot.planLabel,

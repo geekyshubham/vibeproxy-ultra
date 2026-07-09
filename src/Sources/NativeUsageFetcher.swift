@@ -48,14 +48,9 @@ enum NativeUsageFetcher {
     }
 
     static func fetchCost(for serviceType: ServiceType) async -> ProviderCostSnapshot? {
-        switch serviceType {
-        case .codex:
-            return LocalTokenCostScanner.codexSnapshot()
-        case .claude:
-            return LocalTokenCostScanner.claudeSnapshot()
-        default:
-            return nil
-        }
+        await Task.detached(priority: .utility) {
+            LocalTokenCostScanner.snapshot(for: serviceType)
+        }.value
     }
 
     /// Prefer refresh-aware messaging: short-lived access tokens are not a full logout.
@@ -104,7 +99,13 @@ enum NativeUsageFetcher {
                 accessToken: accessToken,
                 chatGPTAccountID: target.accountID
             ) {
-                let planType = result.planType ?? target.planType ?? jwtPlan
+                let planType = ChatGPTPlanFormatter.preferredPlanType(
+                    usagePlan: result.planType,
+                    membershipPlan: target.planType,
+                    jwtPlan: jwtPlan,
+                    structure: target.structure,
+                    workspaceName: target.workspaceName
+                )
                 let title = ChatGPTPlanFormatter.subscriptionTitle(
                     planType: planType,
                     workspaceName: target.workspaceName,
@@ -114,15 +115,22 @@ enum NativeUsageFetcher {
                     ProviderUsageSubAccount(
                         id: target.accountID ?? title,
                         title: title,
-                        subtitle: codexMembershipSubtitle(structure: target.structure, role: target.role),
+                        subtitle: codexMembershipSubtitle(structure: target.structure, role: target.role, planType: planType),
                         planType: planType,
-                        windows: result.windows,
+                        windows: result.windows.map(enrichResetDescription),
                         errorMessage: nil
                     )
                 )
             } else {
+                let planType = ChatGPTPlanFormatter.preferredPlanType(
+                    usagePlan: nil,
+                    membershipPlan: target.planType,
+                    jwtPlan: jwtPlan,
+                    structure: target.structure,
+                    workspaceName: target.workspaceName
+                )
                 let title = ChatGPTPlanFormatter.subscriptionTitle(
-                    planType: target.planType ?? jwtPlan,
+                    planType: planType,
                     workspaceName: target.workspaceName,
                     structure: target.structure
                 )
@@ -130,8 +138,8 @@ enum NativeUsageFetcher {
                     ProviderUsageSubAccount(
                         id: target.accountID ?? title,
                         title: title,
-                        subtitle: codexMembershipSubtitle(structure: target.structure, role: target.role),
-                        planType: target.planType ?? jwtPlan,
+                        subtitle: codexMembershipSubtitle(structure: target.structure, role: target.role, planType: planType),
+                        planType: planType,
                         windows: [],
                         errorMessage: "Could not load limits for this subscription"
                     )
@@ -141,7 +149,11 @@ enum NativeUsageFetcher {
 
         // Prefer showing every discovered subscription when there are 2+ memberships.
         if subAccounts.count >= 2 {
-            let primary = subAccounts.first(where: { !$0.windows.isEmpty }) ?? subAccounts[0]
+            // Prefer highest plan rank with data as the collapsed "primary" strip.
+            let primary = subAccounts
+                .filter { !$0.windows.isEmpty }
+                .max(by: { planRank($0.planType) < planRank($1.planType) })
+                ?? subAccounts[0]
             return ProviderUsageSnapshot(
                 id: authAccountID,
                 providerID: providerID,
@@ -180,12 +192,18 @@ enum NativeUsageFetcher {
             accessToken: accessToken,
             chatGPTAccountID: storedAccountID
         ), !result.windows.isEmpty {
-            let planType = result.planType ?? jwtPlan
+            let planType = ChatGPTPlanFormatter.preferredPlanType(
+                usagePlan: result.planType,
+                membershipPlan: nil,
+                jwtPlan: jwtPlan,
+                structure: nil,
+                workspaceName: nil
+            )
             return ProviderUsageSnapshot(
                 id: authAccountID,
                 providerID: providerID,
                 source: "OpenAI OAuth",
-                windows: result.windows,
+                windows: result.windows.map(enrichResetDescription),
                 subAccounts: [],
                 accountEmail: email,
                 planType: planType,
@@ -246,16 +264,51 @@ enum NativeUsageFetcher {
         ]
     }
 
-    private static func codexMembershipSubtitle(structure: String?, role: String?) -> String? {
+    private static func codexMembershipSubtitle(structure: String?, role: String?, planType: String?) -> String? {
         var parts: [String] = []
         if let structure, !structure.isEmpty {
             parts.append(structure.capitalized)
         }
         if let role, !role.isEmpty {
             let cleaned = role.replacingOccurrences(of: "-", with: " ")
-            parts.append(cleaned)
+            parts.append(cleaned.capitalized)
+        }
+        // Clarify when JWT would have said Go but we resolved a higher tier.
+        if let planType, planType.lowercased() != "go", planType.lowercased() != "free" {
+            // title already has plan; keep subtitle structural
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private static func planRank(_ plan: String?) -> Int {
+        guard let plan else { return 0 }
+        switch plan.lowercased() {
+        case "enterprise": return 100
+        case "business": return 90
+        case "team": return 80
+        case "edu", "education": return 70
+        case "pro": return 60
+        case "prolite": return 55
+        case "plus": return 50
+        case "go": return 40
+        case "free": return 10
+        default: return 20
+        }
+    }
+
+    private static func enrichResetDescription(_ window: RateWindow) -> RateWindow {
+        guard let resetsAt = window.resetsAt else { return window }
+        return RateWindow(
+            usedPercent: window.usedPercent,
+            windowMinutes: window.windowMinutes,
+            resetsAt: resetsAt,
+            resetDescription: ResetCountdownFormatter.resetLine(for: resetsAt),
+            label: window.label,
+            remainingValue: window.remainingValue,
+            totalValue: window.totalValue,
+            unitLabel: window.unitLabel,
+            displayStyle: window.displayStyle
+        )
     }
 
     private static func fetchChatGPTAccountMemberships(accessToken: String) async -> [CodexUsageTarget] {
@@ -274,26 +327,66 @@ enum NativeUsageFetcher {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode),
-                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let accounts = json["accounts"] as? [[String: Any]]
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             else {
                 return []
             }
 
+            // accounts may be array or dict-of-accounts depending on backend version.
+            let accounts: [[String: Any]]
+            if let array = json["accounts"] as? [[String: Any]] {
+                accounts = array
+            } else if let dict = json["accounts"] as? [String: [String: Any]] {
+                accounts = Array(dict.values)
+            } else if let items = json["items"] as? [[String: Any]] {
+                accounts = items
+            } else {
+                return []
+            }
+
             return accounts.compactMap { entry -> CodexUsageTarget? in
-                let id = stringValue(entry, keys: ["id", "account_id", "chatgpt_account_id"])
-                guard let id, !id.isEmpty else { return nil }
-                return CodexUsageTarget(
-                    accountID: id,
-                    planType: stringValue(entry, keys: ["plan_type", "chatgpt_plan_type"]),
-                    workspaceName: stringValue(entry, keys: ["name", "organization_name", "workspace_name"]),
-                    structure: stringValue(entry, keys: ["structure", "account_structure", "kind"]),
-                    role: stringValue(entry, keys: ["account_user_role", "role"])
-                )
+                parseMembershipEntry(entry)
             }
         } catch {
             return []
         }
+    }
+
+    private static func parseMembershipEntry(_ entry: [String: Any]) -> CodexUsageTarget? {
+        // Nested shapes: { account: { id, plan_type, … } } or flat.
+        let nested = entry["account"] as? [String: Any]
+        let org = entry["organization"] as? [String: Any]
+            ?? nested?["organization"] as? [String: Any]
+
+        let id = stringValue(entry, keys: ["id", "account_id", "chatgpt_account_id"])
+            ?? stringValue(nested ?? [:], keys: ["id", "account_id", "chatgpt_account_id"])
+        guard let id, !id.isEmpty else { return nil }
+
+        let planType = stringValue(entry, keys: ["plan_type", "chatgpt_plan_type", "plan"])
+            ?? stringValue(nested ?? [:], keys: ["plan_type", "chatgpt_plan_type", "plan"])
+            ?? stringValue(org ?? [:], keys: ["plan_type", "chatgpt_plan_type", "plan"])
+
+        let workspaceName = stringValue(entry, keys: ["name", "organization_name", "workspace_name", "display_name"])
+            ?? stringValue(nested ?? [:], keys: ["name", "organization_name", "workspace_name", "display_name"])
+            ?? stringValue(org ?? [:], keys: ["name", "title", "display_name"])
+
+        let structure = stringValue(entry, keys: ["structure", "account_structure", "kind", "account_type"])
+            ?? stringValue(nested ?? [:], keys: ["structure", "account_structure", "kind", "account_type"])
+
+        let role = stringValue(entry, keys: ["account_user_role", "role", "user_role"])
+            ?? stringValue(nested ?? [:], keys: ["account_user_role", "role"])
+
+        return CodexUsageTarget(
+            accountID: id,
+            planType: ChatGPTPlanFormatter.normalizePlanType(
+                planType,
+                structure: structure,
+                workspaceName: workspaceName
+            ),
+            workspaceName: workspaceName,
+            structure: structure,
+            role: role
+        )
     }
 
     private static func requestCodexUsagePayload(
@@ -351,27 +444,30 @@ enum NativeUsageFetcher {
             let codeReview = json["code_review_rate_limit"] as? [String: Any]
             var windows: [RateWindow] = []
             if let rateLimit {
-                if let primary = mapCodexWindow(rateLimit["primary_window"] as? [String: Any], fallbackLabel: "Session") {
+                // Primary/secondary labels come from limit_window_seconds (Go plan primary can be monthly).
+                if let primary = mapCodexWindow(rateLimit["primary_window"] as? [String: Any], role: .primary) {
                     windows.append(primary)
                 }
-                if let secondary = mapCodexWindow(rateLimit["secondary_window"] as? [String: Any], fallbackLabel: "Weekly") {
+                if let secondary = mapCodexWindow(rateLimit["secondary_window"] as? [String: Any], role: .secondary) {
                     windows.append(secondary)
                 }
             }
             if let codeReview {
-                if let primary = mapCodexWindow(
-                    codeReview["primary_window"] as? [String: Any],
-                    fallbackLabel: "Code review"
-                ) {
-                    windows.append(
-                        RateWindow(
-                            usedPercent: primary.usedPercent,
-                            windowMinutes: primary.windowMinutes,
-                            resetsAt: primary.resetsAt,
-                            resetDescription: primary.resetDescription,
-                            label: "Code review"
-                        )
-                    )
+                if let primary = mapCodexWindow(codeReview["primary_window"] as? [String: Any], role: .codeReview) {
+                    windows.append(primary)
+                }
+            }
+            // Model-specific limits (CodexBar: additional_rate_limits).
+            if let extras = json["additional_rate_limits"] as? [[String: Any]] {
+                for extra in extras {
+                    let name = stringValue(extra, keys: ["limit_name", "metered_feature"]) ?? "Extra limit"
+                    let nested = extra["rate_limit"] as? [String: Any]
+                    if let primary = mapCodexWindow(nested?["primary_window"] as? [String: Any], role: .named(name)) {
+                        windows.append(primary)
+                    }
+                    if let secondary = mapCodexWindow(nested?["secondary_window"] as? [String: Any], role: .named("\(name) · weekly")) {
+                        windows.append(secondary)
+                    }
                 }
             }
 
@@ -385,28 +481,71 @@ enum NativeUsageFetcher {
         }
     }
 
-    private static func mapCodexWindow(_ window: [String: Any]?, fallbackLabel: String) -> RateWindow? {
+    private enum CodexWindowRole {
+        case primary
+        case secondary
+        case codeReview
+        case named(String)
+    }
+
+    /// Codex/ChatGPT `used_percent` is **used** (0–100), matching CodexBar + Cockpit.
+    /// Labels must follow `limit_window_seconds` — ChatGPT Go's primary window is often **monthly**, not 5h.
+    private static func mapCodexWindow(_ window: [String: Any]?, role: CodexWindowRole) -> RateWindow? {
         guard let window else { return nil }
-        let usedPercent = doubleValue(window, keys: ["used_percent"]) ?? 0
+        // Skip JSON null windows.
+        if window.isEmpty { return nil }
+
+        let usedPercent = clampPercent(doubleValue(window, keys: ["used_percent"]) ?? 0)
         let resetAt = intValue(window, keys: ["reset_at"]).map { Date(timeIntervalSince1970: TimeInterval($0)) }
             ?? intValue(window, keys: ["reset_after_seconds"]).map { Date().addingTimeInterval(TimeInterval($0)) }
         let windowSeconds = intValue(window, keys: ["limit_window_seconds"]) ?? 0
-        let minutes = windowSeconds > 0 ? windowSeconds / 60 : nil
-        let label: String
-        if let minutes {
-            if minutes <= 360 { label = "Session (\(max(1, minutes / 60))h)" }
-            else if minutes <= 10_080 { label = "Weekly" }
-            else { label = fallbackLabel }
-        } else {
-            label = fallbackLabel
-        }
+        let minutes = windowSeconds > 0 ? max(1, (windowSeconds + 59) / 60) : nil
+        let label = codexWindowLabel(seconds: windowSeconds, role: role)
+        let resetDescription = resetAt.map { ResetCountdownFormatter.resetLine(for: $0) }
         return RateWindow(
             usedPercent: usedPercent,
             windowMinutes: minutes,
             resetsAt: resetAt,
-            resetDescription: nil,
+            resetDescription: resetDescription,
             label: label
         )
+    }
+
+    private static func codexWindowLabel(seconds: Int, role: CodexWindowRole) -> String {
+        if case .codeReview = role { return "Code review" }
+        if case .named(let name) = role, seconds <= 0 { return name }
+
+        // Duration-first (source of truth).
+        if seconds > 0 {
+            let hours = Double(seconds) / 3600.0
+            if hours <= 6 {
+                let h = max(1, Int(hours.rounded()))
+                let base = "Session (\(h)h)"
+                if case .named(let name) = role { return "\(name) · \(base)" }
+                return base
+            }
+            let days = hours / 24.0
+            if days <= 8 {
+                if case .named(let name) = role { return "\(name) · Weekly" }
+                return "Weekly"
+            }
+            if days <= 40 {
+                if case .named(let name) = role { return "\(name) · Monthly" }
+                return "Monthly"
+            }
+        }
+
+        // Role fallback when duration missing.
+        switch role {
+        case .primary: return "Session"
+        case .secondary: return "Weekly"
+        case .codeReview: return "Code review"
+        case .named(let name): return name
+        }
+    }
+
+    private static func clampPercent(_ value: Double) -> Double {
+        min(100, max(0, value))
     }
 
     private static func chatgptAccountIDFromJWT(_ token: String?) -> String? {
@@ -568,7 +707,8 @@ enum NativeUsageFetcher {
             let type = (stringValue(limit, keys: ["type"]) ?? "").uppercased()
             let unit = intValue(limit, keys: ["unit"]) ?? 0
             let number = intValue(limit, keys: ["number"]) ?? 0
-            let usedPercent = doubleValue(limit, keys: ["percentage"]) ?? 0
+            // Z.AI `percentage` is **used** 0–100 (paired with `remaining` on some rows).
+            let usedPercent = clampPercent(doubleValue(limit, keys: ["percentage"]) ?? 0)
             let resetsAt = intValue(limit, keys: ["nextResetTime"]).map { millis -> Date in
                 // Values can be ms or seconds; treat large numbers as ms.
                 if millis > 10_000_000_000 {
@@ -727,13 +867,14 @@ enum NativeUsageFetcher {
 
     private static func mapClaudeWindow(_ window: [String: Any]?, defaultMinutes: Int, label: String) -> RateWindow? {
         guard let window else { return nil }
-        let utilization = doubleValue(window, keys: ["utilization"]) ?? 0
+        // Claude OAuth/web `utilization` is **used** percent 0–100 (CodexBar).
+        let utilization = clampPercent(doubleValue(window, keys: ["utilization"]) ?? 0)
         let resetsAt = parseISO8601(stringValue(window, keys: ["resets_at"]))
         return RateWindow(
             usedPercent: utilization,
             windowMinutes: defaultMinutes,
             resetsAt: resetsAt,
-            resetDescription: nil,
+            resetDescription: resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
             label: label
         )
     }
@@ -1024,8 +1165,12 @@ enum NativeUsageFetcher {
         }
     }
 
-    /// Maps `retrieveUserQuotaSummary` groups into sub-accounts
-    /// (e.g. "Gemini Models" vs "Claude and GPT models" each with 5h + weekly bars).
+    /// Maps `retrieveUserQuotaSummary` groups into sub-accounts.
+    /// Cloud Code `remainingFraction` is **remaining** 0…1 (Cockpit stores remaining%).
+    /// We convert to **used%** = (1 − remaining) × 100 to align with Codex `used_percent`.
+    ///
+    /// Expected shape (with project_id):
+    /// Gemini Models → gemini-weekly / gemini-5h; Claude and GPT → 3p-weekly / 3p-5h.
     static func cloudCodeQuotaGroups(from json: [String: Any]) -> [ProviderUsageSubAccount] {
         guard let groups = json["groups"] as? [[String: Any]] else { return [] }
 
@@ -1034,56 +1179,75 @@ enum NativeUsageFetcher {
                 ?? "Model group"
             let description = stringValue(group, keys: ["description"])
             let buckets = group["buckets"] as? [[String: Any]] ?? []
-            let windows: [RateWindow] = buckets.compactMap { bucket in
-                // Summary fractions are remaining, not used.
-                let remaining = doubleValue(bucket, keys: ["remainingFraction"]) ?? 1
-                let usedPercent = max(0, min(100, (1 - remaining) * 100))
-                let resetTime = stringValue(bucket, keys: ["resetTime"])
-                if let resetTime, resetTime.hasPrefix("1970-") { return nil }
+            let shortGroup = cloudCodeShortGroupName(groupTitle)
 
-                let bucketLabel = stringValue(bucket, keys: ["displayName", "window", "bucketId"])
-                    ?? "Limit"
-                let windowMinutes: Int?
-                let window = (stringValue(bucket, keys: ["window"]) ?? "").lowercased()
-                if window.contains("5h") || window.contains("five") || bucketLabel.lowercased().contains("five") {
-                    windowMinutes = 300
-                } else if window.contains("week") || bucketLabel.lowercased().contains("week") {
-                    windowMinutes = 10_080
-                } else {
-                    windowMinutes = nil
-                }
+            let mapped = buckets.compactMap { mapCloudCodeSummaryBucket($0, shortGroup: shortGroup) }
+            // Prefer pool windows (5h/weekly). Drop bare model rows when pools exist.
+            let poolWindows = mapped.filter { $0.windowMinutes != nil }
+            let windows = poolWindows.isEmpty ? mapped : poolWindows
+            guard !windows.isEmpty else { return nil }
 
-                // Prefix with group so flat + grouped UIs stay clear:
-                // "Claude · Five Hour Limit", "Gemini · Weekly Limit"
-                let shortGroup: String
-                let lower = groupTitle.lowercased()
-                if lower.contains("claude") || lower.contains("gpt") || lower.contains("3p") {
-                    shortGroup = "Claude/Opus"
-                } else if lower.contains("gemini") {
-                    shortGroup = "Gemini"
-                } else {
-                    shortGroup = groupTitle
-                }
-
-                return RateWindow(
-                    usedPercent: usedPercent,
-                    windowMinutes: windowMinutes,
-                    resetsAt: parseISO8601(resetTime),
-                    resetDescription: stringValue(bucket, keys: ["description"]),
-                    label: "\(shortGroup) · \(bucketLabel)"
-                )
+            let ordered = windows.sorted { lhs, rhs in
+                let l = lhs.windowMinutes ?? Int.max
+                let r = rhs.windowMinutes ?? Int.max
+                if l != r { return l < r }
+                return (lhs.label ?? "") < (rhs.label ?? "")
             }
 
-            guard !windows.isEmpty else { return nil }
             return ProviderUsageSubAccount(
                 id: groupTitle,
                 title: groupTitle,
                 subtitle: description,
                 planType: nil,
-                windows: windows,
+                windows: ordered,
                 errorMessage: nil
             )
         }
+    }
+
+    private static func cloudCodeShortGroupName(_ groupTitle: String) -> String {
+        let lower = groupTitle.lowercased()
+        if lower.contains("claude") || lower.contains("gpt") || lower.contains("3p") {
+            return "Claude/GPT"
+        }
+        if lower.contains("gemini") {
+            return "Gemini"
+        }
+        return groupTitle
+    }
+
+    private static func mapCloudCodeSummaryBucket(_ bucket: [String: Any], shortGroup: String) -> RateWindow? {
+        let resetTime = stringValue(bucket, keys: ["resetTime"])
+        if let resetTime, resetTime.hasPrefix("1970-") { return nil }
+
+        let remaining = doubleValue(bucket, keys: ["remainingFraction"]) ?? 1
+        let usedPercent = clampPercent((1 - remaining) * 100)
+
+        let displayName = stringValue(bucket, keys: ["displayName"]) ?? "Limit"
+        let bucketId = (stringValue(bucket, keys: ["bucketId", "id"]) ?? "").lowercased()
+        let windowField = (stringValue(bucket, keys: ["window"]) ?? "").lowercased()
+        let blob = "\(bucketId) \(windowField) \(displayName.lowercased())"
+
+        let windowMinutes: Int?
+        if blob.contains("5h") || blob.contains("five") || windowField == "5h" {
+            windowMinutes = 300
+        } else if blob.contains("week") || windowField == "weekly" {
+            windowMinutes = 10_080
+        } else if blob.contains("day") || windowField == "daily" {
+            windowMinutes = 1_440
+        } else {
+            windowMinutes = nil
+        }
+
+        let resetsAt = parseISO8601(resetTime)
+        return RateWindow(
+            usedPercent: usedPercent,
+            windowMinutes: windowMinutes,
+            resetsAt: resetsAt,
+            resetDescription: stringValue(bucket, keys: ["description"])
+                ?? resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
+            label: "\(shortGroup) · \(displayName)"
+        )
     }
 
     // MARK: - Kiro
@@ -1158,22 +1322,39 @@ enum NativeUsageFetcher {
         label: String
     ) -> RateWindow? {
         guard let breakdown else { return nil }
-        let currentUsage = doubleValue(breakdown, keys: ["currentUsage", "currentUsageWithPrecision"]) ?? 0
-        let usageLimit = doubleValue(breakdown, keys: ["usageLimit", "usageLimitWithPrecision"]) ?? 0
-        guard usageLimit > 0 else { return nil }
 
-        let usedPercent = max(0, min(100, currentUsage / usageLimit * 100))
+        // Free included pool (often 50 on KIRO FREE).
+        let freeUsed = doubleValue(breakdown, keys: ["currentUsageWithPrecision", "currentUsage"]) ?? 0
+        let freeLimit = doubleValue(breakdown, keys: ["usageLimitWithPrecision", "usageLimit"]) ?? 0
+        // Product credit budget kiro-cli shows (often 10_000) — not the free usageLimit.
+        let overageCap = doubleValue(breakdown, keys: ["overageCapWithPrecision", "overageCap"]) ?? 0
+        let overageUsed = doubleValue(breakdown, keys: ["currentOveragesWithPrecision", "currentOverages"]) ?? 0
+
+        // Total credits = max(included free limit, overage/prepaid cap). Free tier returns
+        // usageLimit=50 and overageCap=10000; kiro-cli / product UI reports the 10_000 pool.
+        let total = max(freeLimit, overageCap)
+        guard total > 0 else { return nil }
+
+        let used = freeUsed + overageUsed
+        let remaining = max(0, total - used)
+        let usedPercent = clampPercent(used / total * 100)
+
         let resetEpoch = doubleValue(breakdown, keys: ["nextDateReset"])
             ?? (fallbackReset as? Double)
             ?? (fallbackReset as? Int).map(Double.init)
+            ?? (fallbackReset as? NSNumber).map { $0.doubleValue }
         let resetsAt = resetEpoch.map { Date(timeIntervalSince1970: TimeInterval($0)) }
 
         return RateWindow(
             usedPercent: usedPercent,
             windowMinutes: 43_200,
             resetsAt: resetsAt,
-            resetDescription: nil,
-            label: label
+            resetDescription: resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
+            label: label,
+            remainingValue: remaining,
+            totalValue: total,
+            unitLabel: "credits",
+            displayStyle: .creditsRemaining
         )
     }
 
@@ -1233,12 +1414,14 @@ enum NativeUsageFetcher {
                 return .empty(authAccountID: authAccountID, providerID: providerID, error: "Could not parse billing usage")
             }
 
+            // Grok product default is percentage (not absolute credits).
             let primary = RateWindow(
                 usedPercent: parsed.usedPercent,
                 windowMinutes: nil,
                 resetsAt: parsed.resetsAt,
-                resetDescription: nil,
-                label: "Grok credits"
+                resetDescription: parsed.resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
+                label: "Grok usage",
+                displayStyle: .percent
             )
 
             return ProviderUsageSnapshot(
@@ -1406,6 +1589,10 @@ enum NativeUsageFetcher {
 
     private static func doubleValue(_ json: [String: Any], keys: [String]) -> Double? {
         for key in keys {
+            // JSONSerialization boxes numbers as NSNumber — cast via NSNumber first.
+            if let number = json[key] as? NSNumber {
+                return number.doubleValue
+            }
             if let value = json[key] as? Double { return value }
             if let value = json[key] as? Int { return Double(value) }
             if let value = json[key] as? String, let parsed = Double(value) { return parsed }
@@ -1415,6 +1602,9 @@ enum NativeUsageFetcher {
 
     private static func intValue(_ json: [String: Any], keys: [String]) -> Int? {
         for key in keys {
+            if let number = json[key] as? NSNumber {
+                return number.intValue
+            }
             if let value = json[key] as? Int { return value }
             if let value = json[key] as? Double { return Int(value) }
             if let value = json[key] as? String, let parsed = Int(value) { return parsed }
@@ -1486,18 +1676,21 @@ enum NativeUsageFetcher {
     }
 
     private static func mapCloudCodeBucket(_ bucket: [String: Any], label: String) -> RateWindow? {
-        guard let resetTime = stringValue(bucket, keys: ["resetTime"]),
-              !resetTime.hasPrefix("1970-")
-        else { return nil }
+        // Detail `retrieveUserQuota` rows are per-model remainingFraction (Cockpit).
+        let resetTime = stringValue(bucket, keys: ["resetTime"])
+        if let resetTime, resetTime.hasPrefix("1970-") { return nil }
 
         let remaining = doubleValue(bucket, keys: ["remainingFraction"]) ?? 1
-        let usedPercent = max(0, min(100, (1 - remaining) * 100))
+        let usedPercent = clampPercent((1 - remaining) * 100)
+        let modelID = stringValue(bucket, keys: ["modelId", "model_id", "name", "bucketId"])
+        let title = label.isEmpty ? (modelID ?? "Model") : label
+        let resetsAt = parseISO8601(resetTime)
         return RateWindow(
             usedPercent: usedPercent,
-            windowMinutes: 1_440,
-            resetsAt: parseISO8601(resetTime),
-            resetDescription: nil,
-            label: label.isEmpty ? nil : label
+            windowMinutes: nil, // model pool residual — not a fixed 5h/weekly row
+            resetsAt: resetsAt,
+            resetDescription: resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
+            label: title
         )
     }
 
@@ -1506,12 +1699,13 @@ enum NativeUsageFetcher {
             return nil
         }
         let remaining = doubleValue(quotaInfo, keys: ["remainingFraction"]) ?? 1
-        let usedPercent = max(0, min(100, (1 - remaining) * 100))
+        let usedPercent = clampPercent((1 - remaining) * 100)
+        let resetsAt = parseISO8601(stringValue(quotaInfo, keys: ["resetTime"]))
         return RateWindow(
             usedPercent: usedPercent,
-            windowMinutes: 1_440,
-            resetsAt: parseISO8601(stringValue(quotaInfo, keys: ["resetTime"])),
-            resetDescription: nil,
+            windowMinutes: nil,
+            resetsAt: resetsAt,
+            resetDescription: resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
             label: label.isEmpty ? nil : label
         )
     }
@@ -1600,7 +1794,11 @@ private extension RateWindow {
             windowMinutes: windowMinutes,
             resetsAt: resetsAt,
             resetDescription: resetDescription,
-            label: label
+            label: label,
+            remainingValue: remainingValue,
+            totalValue: totalValue,
+            unitLabel: unitLabel,
+            displayStyle: displayStyle
         )
     }
 }
@@ -1614,6 +1812,9 @@ extension NativeUsageFetcher {
     private struct GrokBillingParseResult {
         let usedPercent: Double
         let resetsAt: Date?
+        /// Absolute remaining credits when the billing payload exposes them.
+        let remainingCredits: Double?
+        let totalCredits: Double?
     }
 
     private static func grokGRPCError(from data: Data, payload: [String: Any] = [:]) -> String? {
@@ -1678,8 +1879,14 @@ extension NativeUsageFetcher {
             reset != nil &&
             hasUsagePeriod
 
+        // Grok product default is percentage (not absolute credits).
         guard let percent = parsedPercent ?? (noUsageYet ? 0 : nil) else { return nil }
-        return GrokBillingParseResult(usedPercent: percent, resetsAt: reset)
+        return GrokBillingParseResult(
+            usedPercent: percent,
+            resetsAt: reset,
+            remainingCredits: nil,
+            totalCredits: nil
+        )
     }
 
     private struct GrokProtobufScan {

@@ -31,7 +31,9 @@ final class MenuBarPopoverController: NSObject, NSPopoverDelegate {
         self.onQuit = onQuit
         super.init()
 
-        popover.behavior = .transient
+        // Semitransient keeps the panel open while interacting with buttons (Wake, tabs).
+        // Transient often swallows the first click and closes before the action runs.
+        popover.behavior = .semitransient
         popover.animates = true
         popover.delegate = self
     }

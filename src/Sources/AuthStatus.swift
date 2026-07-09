@@ -346,11 +346,13 @@ class AuthManager: ObservableObject {
         switch serviceType {
         case .codex:
             if let plan = json["plan_type"] as? String, !plan.isEmpty {
-                return ChatGPTPlanFormatter.displayName(for: plan)
+                return ChatGPTPlanFormatter.displayName(for: ChatGPTPlanFormatter.normalizePlanType(plan))
             }
             let token = (json["access_token"] as? String) ?? (json["id_token"] as? String)
             if let plan = planTypeFromOpenAIJWT(token) {
-                return ChatGPTPlanFormatter.displayName(for: plan)
+                // JWT alone often says "go" for Plus/Enterprise seats — still show it,
+                // but live usage fetch will upgrade from memberships when available.
+                return ChatGPTPlanFormatter.displayName(for: ChatGPTPlanFormatter.normalizePlanType(plan))
             }
             return nil
         case .copilot:

@@ -3,6 +3,7 @@ import SwiftUI
 import WebKit
 import UserNotifications
 import Sparkle
+import Combine
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNotificationCenterDelegate {
     var statusItem: NSStatusItem!
@@ -11,6 +12,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     var thinkingProxy: ThinkingProxy!
     let authManager = AuthManager()
     let usageStore = UsageStore()
+    let appSettings = AppSettings.shared
+    let nativeSession = NativeSessionManager.shared
+    private var wakeScheduler: QuotaWakeScheduler!
+    private var settingsCancellables = Set<AnyCancellable>()
     private var popoverController: MenuBarPopoverController!
     private let notificationCenter = UNUserNotificationCenter.current()
     private var notificationPermissionGranted = false
@@ -60,6 +65,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         usageStore.startAutoRefresh()
         // Keep OAuth access tokens fresh (refresh ~15 minutes before expiry).
         TokenRefreshService.startAutoRefresh()
+
+        setupSessionAndScheduler()
         
         // Warm commonly used icons to avoid first-use disk hits
         preloadIcons()
@@ -87,8 +94,103 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         )
     }
     
-    private func preloadIcons() {
-        let statusIconSize = NSSize(width: 18, height: 18)
+    private func setupSessionAndScheduler() {
+        // Detect which account is currently live in each native tool (Codex/Claude/Gemini).
+        nativeSession.refresh(accounts: authManager.serviceAccounts.mapValues { $0.accounts })
+
+        // Automatic "wake 5h window" keep-alive scheduler.
+        wakeScheduler = QuotaWakeScheduler(settings: appSettings)
+        wakeScheduler.configure(
+            usageStore: usageStore,
+            accountsProvider: { [weak self] in
+                self?.authManager.serviceAccounts.mapValues { $0.accounts } ?? [:]
+            },
+            proxyPortProvider: { [weak self] in
+                Int(self?.thinkingProxy.proxyPort ?? 8317)
+            }
+        )
+        if appSettings.autoWakeEnabled {
+            wakeScheduler.start()
+        }
+
+        // React to settings changes live.
+        appSettings.$autoWakeEnabled
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] enabled in
+                guard let self else { return }
+                if enabled { self.wakeScheduler.start() } else { self.wakeScheduler.stop() }
+            }
+            .store(in: &settingsCancellables)
+
+        Publishers.Merge(
+            appSettings.$usageRefreshMinutes.map { _ in () },
+            appSettings.$statusRefreshMinutes.map { _ in () }
+        )
+        .dropFirst()
+        .debounce(for: .milliseconds(400), scheduler: DispatchQueue.main)
+        .sink { [weak self] in
+            self?.usageStore.applyRefreshSettings()
+        }
+        .store(in: &settingsCancellables)
+
+        // Live menu-bar usage badge (peak quota %) — coalesced to avoid churn.
+        usageStore.objectWillChange
+            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
+            .sink { [weak self] in self?.updateMenuBarBadge() }
+            .store(in: &settingsCancellables)
+        appSettings.$menuBarUsageBadge
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateMenuBarBadge() }
+            .store(in: &settingsCancellables)
+    }
+
+    /// Peak quota usage across all live accounts (for the optional menu-bar badge).
+    private func worstUsedPercent() -> Double {
+        var worst = 0.0
+        for (_, snapshot) in usageStore.usageByAccountID {
+            let windows = snapshot.windows + snapshot.subAccounts.flatMap(\.windows)
+            worst = max(worst, windows.map(\.usedPercent).max() ?? 0)
+        }
+        return worst
+    }
+
+    private func updateMenuBarBadge() {
+        guard let button = statusItem?.button else { return }
+        guard appSettings.menuBarUsageBadge else {
+            if !button.title.isEmpty || button.attributedTitle.length > 0 {
+                button.attributedTitle = NSAttributedString(string: "")
+                button.title = ""
+            }
+            button.imagePosition = .imageOnly
+            return
+        }
+
+        let worst = worstUsedPercent()
+        guard worst > 0 else {
+            button.attributedTitle = NSAttributedString(string: "")
+            button.imagePosition = .imageOnly
+            return
+        }
+
+        let color: NSColor
+        let remaining = 100 - worst
+        if remaining > 50 { color = .systemGreen }
+        else if remaining > 20 { color = .systemOrange }
+        else { color = .systemRed }
+
+        let title = " \(Int(worst.rounded()))%"
+        button.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .foregroundColor: color,
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
+            ]
+        )
+        button.imagePosition = .imageLeft
+    }
+
+    private func preloadIcons() {        let statusIconSize = NSSize(width: 18, height: 18)
         let serviceIconSize = NSSize(width: 20, height: 20)
         
         let iconsToPreload = [
@@ -193,7 +295,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         window.delegate = self
         window.isReleasedWhenClosed = false
 
-        let contentView = SettingsView(serverManager: serverManager, authManager: authManager)
+        let contentView = SettingsView(
+            serverManager: serverManager,
+            authManager: authManager,
+            usageStore: usageStore
+        )
         window.contentView = NSHostingView(rootView: contentView)
 
         settingsWindow = window
@@ -285,6 +391,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         NSLog("[AppDelegate] Auth directory changed notification received — refreshing settings")
         serverManager.handleObservedConfigInputsChanged()
         authManager.checkAuthStatus()
+        nativeSession.refresh(accounts: authManager.serviceAccounts.mapValues { $0.accounts })
         Task {
             await usageStore.refreshVisibleProviders(
                 from: ServiceType.allCases,
@@ -313,6 +420,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                 NSLog("[MenuBar] Failed to load %@ icon; using fallback", serverManager.isRunning ? "active" : "inactive")
             }
         }
+        updateMenuBarBadge()
     }
 
     func showNotification(title: String, body: String) {
@@ -349,6 +457,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     func applicationWillTerminate(_ notification: Notification) {
         TokenRefreshService.stopAutoRefresh()
         usageStore.stopAutoRefresh()
+        wakeScheduler?.stop()
         NotificationCenter.default.removeObserver(self, name: .serverStatusChanged, object: nil)
         NotificationCenter.default.removeObserver(self, name: .authDirectoryChanged, object: nil)
         pendingAuthRefresh?.cancel()
@@ -452,16 +561,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         configInputPoller?.cancel()
         polledConfigInputsFingerprint = currentConfigInputsFingerprint()
 
-        let poller = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
-        poller.schedule(deadline: .now() + 1, repeating: 1)
+        // 5s is plenty for config/auth changes; 1s SHA-256 of credential files burned CPU.
+        let poller = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        poller.schedule(deadline: .now() + 5, repeating: 5)
         poller.setEventHandler { [weak self] in
             guard let self else { return }
             let currentFingerprint = self.currentConfigInputsFingerprint()
             guard currentFingerprint != self.polledConfigInputsFingerprint else {
                 return
             }
-            self.polledConfigInputsFingerprint = currentFingerprint
-            self.postObservedConfigInputsChanged(reason: "Config input fingerprint changed during poll")
+            DispatchQueue.main.async {
+                self.polledConfigInputsFingerprint = currentFingerprint
+                self.postObservedConfigInputsChanged(reason: "Config input fingerprint changed during poll")
+            }
         }
         poller.resume()
         configInputPoller = poller

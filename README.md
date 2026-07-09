@@ -32,15 +32,22 @@ Ultra keeps the native macOS menu bar experience and adds production-oriented ac
 | Area | Ultra improvements |
 |------|--------------------|
 | **Usage limits** | Live per-account usage cards with streaming updates (results appear as each account finishes, not only after everything is done) |
+| **Codex resets** | Clear reset countdowns (`Resets in 3h 12m · time`) on every quota window |
+| **Status & incidents** | Live statuspage feeds (OpenAI, Anthropic, GitHub, Cursor, xAI) with active incidents |
+| **Analytics accuracy** | Accurate token volume + estimated API-equivalent $ by provider and most-used models — Codex usage is now parsed from local session logs (previously showed zero), per-turn deltas end Codex cumulative-vs-delta double counting, model names are validated (Claude session-title slugs like `reply-with-exactly-the-...` no longer appear as models), and Gemini/Antigravity double-counting is removed |
 | **Antigravity** | Separate Gemini Pro/Flash vs Claude/Opus quota groups via Cloud Code `retrieveUserQuota` + `retrieveUserQuotaSummary` |
-| **ChatGPT / Codex** | Multi-subscription visibility (e.g. Go vs Team/Enterprise windows) via Codex usage APIs |
+| **ChatGPT / Codex** | Multi-subscription visibility; plan ranking so Enterprise/Team/Plus are not demoted to JWT “Go” |
 | **Z.AI Coding Plan** | Quota limits from `api.z.ai` monitor endpoints (similar to zcode.z.ai) |
 | **Account import** | Import configured local accounts for providers (Claude, Codex, Gemini, Antigravity, Z.AI, Copilot, Grok, OpenCode Go, and more) |
+| **Account switching** | Detects the live account in native tools (Codex `~/.codex/auth.json`, Claude keychain, Gemini `google_accounts.json`) and switches with one click — writes the native auth atomically with a backup and restarts the desktop app when running; the already-active account shows an **Active** badge instead of the button (Cockpit-style) |
 | **False expiry fix** | Access-token clock expiry alone no longer marks a session dead when a usable refresh token still exists |
 | **Proactive refresh** | Background token refresh with grace window so sessions stay warm |
-| **Quota wake** | “Wake 5h” style keep-alive / dummy pings to reduce idle quota window surprises |
+| **Auto quota wake** | Auto “wake 5h window” scheduler keeps supported provider sessions (Codex/Claude/Antigravity/Gemini) warm on a ~5h cadence with cooldown, grace, and back-off — configurable |
 | **OpenCode Go** | First-class OpenAI-compatibility provider entry (not hidden as reserved) |
-| **Menu bar UX** | Richer popover: server status, accounts, usage refresh, settings entry |
+| **Menu bar UX** | CodexBar-inspired glass UI: Overview / Status / Analytics tabs, pulse strip, refined cards |
+| **Preferences** | New settings pane: usage/status refresh cadence, analytics history window, show/hide cost estimates and the Status/Analytics tabs, restart-app-on-switch and confirm-before-switch toggles, and auto-wake provider selection + grace |
+| **Menu bar badge** | Optional menu-bar badge showing peak quota % |
+| **Performance** | Faster local log scanning: per-file mtime cache (unchanged files aren't re-parsed), coalesced timers (`Timer.tolerance`), configurable intervals, and a trimmed scan list |
 
 Core VibeProxy capabilities remain: one-click server start/stop, multi-account round-robin, provider enable/disable, Vercel AI Gateway option for Claude, and a self-contained `.app` bundle.
 

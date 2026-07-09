@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 
 enum ConfigInputFingerprint {
     static func relevantFileURLs(
@@ -54,20 +53,15 @@ enum ConfigInputFingerprint {
 
         for url in urls {
             parts.append(url.lastPathComponent)
-            if let data = try? Data(contentsOf: url) {
-                let hash = SHA256.hash(data: data)
-                parts.append(hash.hexEncodedString())
+            // Cheap fingerprint: size + mtime. Full SHA-256 every second was a CPU hog.
+            if let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
+                parts.append(String(values.fileSize ?? -1))
+                parts.append(String(Int((values.contentModificationDate ?? .distantPast).timeIntervalSince1970)))
             } else {
                 parts.append("<unreadable>")
             }
         }
 
         return parts.joined(separator: "\n---\n")
-    }
-}
-
-private extension SHA256.Digest {
-    func hexEncodedString() -> String {
-        self.compactMap { String(format: "%02x", $0) }.joined()
     }
 }

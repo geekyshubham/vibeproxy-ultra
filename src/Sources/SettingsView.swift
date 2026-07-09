@@ -540,6 +540,9 @@ struct CustomProviderRow: View {
 struct SettingsView: View {
     @ObservedObject var serverManager: ServerManager
     @ObservedObject var authManager: AuthManager
+    @ObservedObject var usageStore: UsageStore
+    @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var nativeSession = NativeSessionManager.shared
     @State private var launchAtLogin = false
     @State private var authenticatingService: ServiceType? = nil
     @State private var authenticatingCustomProviderID: String? = nil
@@ -553,6 +556,15 @@ struct SettingsView: View {
     @State private var selectedCustomProvider: CustomProviderDefinition?
     @State private var customProviderApiKey = ""
     @State private var expandedRowCount = 0
+    @State private var settingsPane: SettingsPane = .providers
+
+    private enum SettingsPane: String, CaseIterable, Identifiable {
+        case providers = "Providers"
+        case preferences = "Preferences"
+        case analytics = "Analytics"
+        case status = "Status"
+        var id: String { rawValue }
+    }
     
     private enum Timing {
         static let serverRestartDelay: TimeInterval = 0.3
@@ -567,7 +579,30 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            Picker("", selection: $settingsPane) {
+                ForEach(SettingsPane.allCases) { pane in
+                    Text(pane.rawValue).tag(pane)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+
             ScrollView {
+                switch settingsPane {
+                case .analytics:
+                    AnalyticsDashboardView(usageStore: usageStore, compact: false)
+                        .padding(16)
+                case .preferences:
+                    preferencesForm
+                case .status:
+                    StatusIncidentsView(usageStore: usageStore, compact: false)
+                        .padding(16)
+                        .onAppear {
+                            Task { await usageStore.refreshStatus() }
+                        }
+                case .providers:
                 Form {
                 Section {
                     HStack {
@@ -953,7 +988,8 @@ struct SettingsView: View {
                 }
                 .formStyle(.grouped)
                 .padding(.bottom, 8)
-            }
+                } // switch settingsPane
+            } // ScrollView
 
             Spacer()
                 .frame(height: 6)
@@ -1095,6 +1131,128 @@ struct SettingsView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(authResultMessage)
+        }
+    }
+
+    // MARK: - Preferences pane
+
+    private var wakeProviders: [(id: String, name: String)] {
+        [("codex", "Codex"), ("claude", "Claude Code"), ("antigravity", "Antigravity"), ("gemini", "Gemini")]
+    }
+
+    private var switchableProvidersWithAccounts: [ServiceType] {
+        ServiceType.allCases.filter {
+            nativeSession.supportsSwitching($0) && !authManager.accounts(for: $0).isEmpty
+        }
+    }
+
+    private func wakeProviderBinding(_ id: String) -> Binding<Bool> {
+        Binding(
+            get: { settings.autoWakeProviderIDs.contains(id) },
+            set: { isOn in
+                if isOn { settings.autoWakeProviderIDs.insert(id) }
+                else { settings.autoWakeProviderIDs.remove(id) }
+            }
+        )
+    }
+
+    private var preferencesForm: some View {
+        Form {
+            Section("Refresh & performance") {
+                Stepper(value: $settings.usageRefreshMinutes, in: 1...30, step: 1) {
+                    HStack {
+                        Text("Usage refresh")
+                        Spacer()
+                        Text("\(Int(settings.usageRefreshMinutes)) min").foregroundStyle(.secondary)
+                    }
+                }
+                Stepper(value: $settings.statusRefreshMinutes, in: 2...60, step: 1) {
+                    HStack {
+                        Text("Status refresh")
+                        Spacer()
+                        Text("\(Int(settings.statusRefreshMinutes)) min").foregroundStyle(.secondary)
+                    }
+                }
+                Picker("Analytics history", selection: $settings.analyticsHistoryDays) {
+                    Text("7 days").tag(7)
+                    Text("14 days").tag(14)
+                    Text("30 days").tag(30)
+                    Text("60 days").tag(60)
+                    Text("90 days").tag(90)
+                }
+                Text("Longer refresh intervals and shorter history reduce CPU and battery use.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Display") {
+                Toggle("Show cost estimates ($)", isOn: $settings.showCostEstimates)
+                Toggle("Show Status tab", isOn: $settings.showStatusTab)
+                Toggle("Show Analytics tab", isOn: $settings.showAnalyticsTab)
+            }
+
+            Section("Active Mac session & switching") {
+                if switchableProvidersWithAccounts.isEmpty {
+                    Text("Connect Codex, Claude, or Gemini accounts to manage the live native session.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(switchableProvidersWithAccounts, id: \.self) { type in
+                        HStack {
+                            Text(type.displayName)
+                            Spacer()
+                            if let identity = nativeSession.currentIdentity(for: type) {
+                                Text(identity.label)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            } else {
+                                Text("not detected")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                    HStack {
+                        Button("Re-detect current sessions") {
+                            nativeSession.refresh(accounts: authManager.serviceAccounts.mapValues { $0.accounts })
+                        }
+                        if nativeSession.isRefreshing {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                }
+                Toggle("Restart the desktop app after switching", isOn: $settings.restartAppOnSwitch)
+                Toggle("Ask before switching accounts", isOn: $settings.confirmBeforeSwitch)
+                Text("Switch buttons appear per account in the menu bar panel (hidden for the account already active on this Mac).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Auto-wake 5h window") {
+                Toggle("Automatically keep sessions warm", isOn: $settings.autoWakeEnabled)
+                if settings.autoWakeEnabled {
+                    ForEach(wakeProviders, id: \.id) { provider in
+                        Toggle(provider.name, isOn: wakeProviderBinding(provider.id))
+                            .padding(.leading, 8)
+                    }
+                    Stepper(value: $settings.autoWakeGraceMinutes, in: 0...60, step: 1) {
+                        HStack {
+                            Text("Grace after reset")
+                            Spacer()
+                            Text("\(Int(settings.autoWakeGraceMinutes)) min").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Text("Sends a tiny dummy request roughly every 5 hours so a provider's rolling session quota keeps advancing. Uses negligible tokens.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            nativeSession.refresh(accounts: authManager.serviceAccounts.mapValues { $0.accounts })
         }
     }
 

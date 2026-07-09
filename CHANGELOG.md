@@ -4,6 +4,41 @@ All notable changes to VibeProxy will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Ultra] - 2026-07-09
+
+VibeProxy Ultra feature release — account, usage, and session-reliability improvements on top of upstream VibeProxy (based on VibeProxy by Automaze, Ltd., MIT).
+
+### Added
+- **Current-account detection + one-click switching** - See which account is live in the native tools and switch to another with a single click (Cockpit-style)
+  - Detects the active account for Codex (`~/.codex/auth.json`), Claude (macOS keychain), and Gemini (`google_accounts.json`)
+  - "Switch to this account" writes the native auth atomically with a backup, and restarts the desktop app when it is running
+  - The already-active account shows an **Active** badge instead of the switch button
+- **Auto "wake 5h window" scheduler** - Keeps supported provider sessions warm on a ~5h cadence
+  - Covers Codex, Claude, Antigravity, and Gemini
+  - Cooldown, grace window, and back-off to avoid unnecessary pings
+  - Configurable from the new Preferences pane
+- **Preferences pane** - New settings screen to tune Ultra behavior
+  - Usage/status refresh cadence and analytics history window
+  - Show/hide cost estimates and the Status / Analytics tabs
+  - Restart-app-on-switch and confirm-before-switch toggles
+  - Auto-wake provider selection and grace window
+- **Menu-bar usage badge (optional)** - Show peak quota % directly in the menu bar
+
+### Fixed
+- **Analytics accuracy** - Token analytics now reflect real usage
+  - Codex token usage is parsed correctly from local session logs (previously showed zero)
+  - Fixed Codex cumulative-vs-delta double counting by using per-turn deltas
+  - Fixed the "random models" bug where Claude session-title slugs (e.g. `reply-with-exactly-the-...`) appeared as model names
+  - Model names are now validated before they are shown
+  - Removed Gemini/Antigravity double-counting
+
+### Improved
+- **Local log-scanner performance** - Lower CPU use and snappier refreshes
+  - Per-file mtime cache so unchanged session logs are not re-parsed
+  - Coalesced timers via `Timer.tolerance` to reduce wakeups
+  - Configurable scan/refresh intervals and a trimmed scan list
+
+
 ## [1.8.50] - 2026-01-13
 
 ## [1.8.222] - 2026-07-08
@@ -1968,6 +2003,7 @@ All future changes will be documented here before release.
 
 ---
 
+[Ultra]: https://github.com/geekyshubham/vibeproxy-ultra/releases
 [1.8.222]: https://github.com/automazeio/vibeproxy/releases/tag/v1.8.222
 [1.8.221]: https://github.com/automazeio/vibeproxy/releases/tag/v1.8.221
 [1.8.220]: https://github.com/automazeio/vibeproxy/releases/tag/v1.8.220
