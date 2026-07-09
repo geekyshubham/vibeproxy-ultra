@@ -100,9 +100,12 @@ struct MenuBarPanelView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("VibeProxy Ultra")
                     .font(.headline)
-                Text(serverManager.isRunning ? "Proxy · port \(proxyPort)" : "Server stopped")
+                // Use String(port) so SwiftUI LocalizedStringKey does not locale-format
+                // the integer (e.g. "8,337" instead of "8337").
+                Text(serverManager.isRunning ? "Proxy · port \(String(proxyPort))" : "Server stopped")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .monospacedDigit()
             }
             Spacer()
             if usageStore.isRefreshing || usageStore.isRefreshingStatus {
