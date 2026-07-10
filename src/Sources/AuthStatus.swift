@@ -154,7 +154,11 @@ class AuthManager: ObservableObject {
         }
 
         do {
-            let files = try FileManager.default.contentsOfDirectory(at: authDir, includingPropertiesForKeys: nil)
+            let files = try FileManager.default.contentsOfDirectory(
+                at: authDir,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
             NSLog("[AuthStatus] Scanning %d files in auth directory", files.count)
 
             for file in files where file.pathExtension == "json" {
@@ -194,7 +198,105 @@ class AuthManager: ObservableObject {
             NSLog("[AuthStatus] Error checking auth status: %@", error.localizedDescription)
         }
 
+        // Collapse re-logins / duplicate auth files that share the same identity.
+        for type in ServiceType.allCases {
+            let raw = newAccounts[type] ?? []
+            let deduped = Self.deduplicateAccounts(raw)
+            if deduped.count != raw.count {
+                NSLog(
+                    "[AuthStatus] Deduped %@ accounts: %d → %d",
+                    type.displayName,
+                    raw.count,
+                    deduped.count
+                )
+            }
+            newAccounts[type] = deduped
+        }
+
         return newAccounts
+    }
+
+    /// One row per identity per provider.
+    /// Identity key: email → login/username → (provider-specific) → file id (no merge).
+    /// Prefer: enabled > session still usable > newer mtime > stable id.
+    private static func deduplicateAccounts(_ accounts: [AuthAccount]) -> [AuthAccount] {
+        guard accounts.count > 1 else { return accounts }
+
+        var bestByKey: [String: AuthAccount] = [:]
+        var order: [String] = []
+
+        for account in accounts {
+            let key = identityKey(for: account)
+            if let existing = bestByKey[key] {
+                if prefers(account, over: existing) {
+                    bestByKey[key] = account
+                }
+            } else {
+                bestByKey[key] = account
+                order.append(key)
+            }
+        }
+
+        return order.compactMap { bestByKey[$0] }
+    }
+
+    /// Stable identity used only for UI/list dedupe (does not delete files on disk).
+    private static func identityKey(for account: AuthAccount) -> String {
+        if let email = account.email?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !email.isEmpty
+        {
+            return "email:" + email.lowercased()
+        }
+        if let login = account.login?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !login.isEmpty
+        {
+            return "login:" + login.lowercased()
+        }
+
+        // Filename patterns like `xai-user@host.json` or `codex-user@host.json`
+        let name = account.filePath.deletingPathExtension().lastPathComponent
+        if let at = name.firstIndex(of: "@") {
+            // Strip provider prefix up to first '-' when it looks like email-bearing name.
+            let afterPrefix: Substring = {
+                if let dash = name.firstIndex(of: "-"), dash < at {
+                    return name[name.index(after: dash)...]
+                }
+                return name[...]
+            }()
+            let candidate = String(afterPrefix).trimmingCharacters(in: .whitespacesAndNewlines)
+            if candidate.contains("@") {
+                return "email:" + candidate.lowercased()
+            }
+        }
+
+        // No mergeable identity — keep as unique file (API keys, device flows, etc.).
+        return "file:" + account.id
+    }
+
+    private static func prefers(_ candidate: AuthAccount, over existing: AuthAccount) -> Bool {
+        // Enabled beats disabled.
+        if candidate.isDisabled != existing.isDisabled {
+            return !candidate.isDisabled
+        }
+        // Usable session beats expired.
+        if candidate.isExpired != existing.isExpired {
+            return !candidate.isExpired
+        }
+        // Newer auth file wins (re-login).
+        let cMtime = (try? candidate.filePath.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate ?? .distantPast
+        let eMtime = (try? existing.filePath.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate ?? .distantPast
+        if cMtime != eMtime {
+            return cMtime > eMtime
+        }
+        // Prefer a row that already has email/login populated.
+        let cScore = (candidate.email?.isEmpty == false ? 2 : 0) + (candidate.login?.isEmpty == false ? 1 : 0)
+        let eScore = (existing.email?.isEmpty == false ? 2 : 0) + (existing.login?.isEmpty == false ? 1 : 0)
+        if cScore != eScore {
+            return cScore > eScore
+        }
+        return candidate.id < existing.id
     }
 
     private func applyAccounts(_ newAccounts: [ServiceType: [AuthAccount]]) {

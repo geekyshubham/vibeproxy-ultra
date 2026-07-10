@@ -1498,57 +1498,79 @@ enum NativeUsageFetcher {
         providerID: String,
         payload: [String: Any]
     ) async -> ProviderUsageSnapshot {
-        let email = stringValue(payload, keys: ["email"])
-            ?? stringValue(readGrokAppPayload() ?? [:], keys: ["email"])
+        // Keep this account's own email so multi-account lists do not all show ~/.grok identity.
+        let accountEmail = stringValue(payload, keys: ["email"])
+        let localGrok = readGrokAppPayload()
+        let localEmail = stringValue(localGrok ?? [:], keys: ["email"])
 
-        // Prefer a fresh `~/.grok/auth.json` token. cli-proxy xAI OAuth tokens often fail
-        // GetGrokCreditsConfig with grpc-status 7 (bad-credentials) even when SuperGrok works.
-        var tokenCandidates: [String] = []
-        if let local = readGrokAppPayload(),
-           let t = stringValue(local, keys: ["access_token", "key"]),
-           !t.isEmpty
+        // Token order (per account — never stamp SuperGrok onto every row blindly):
+        // 1) this auth file's token
+        // 2) ~/.grok/auth.json only when emails match (or this file has no email)
+        var tokenCandidates: [(token: String, sourceEmail: String?)] = []
+        if let t = stringValue(payload, keys: ["access_token", "key"]), !t.isEmpty {
+            tokenCandidates.append((t, accountEmail))
+        }
+        if let localGrok,
+           let t = stringValue(localGrok, keys: ["access_token", "key"]),
+           !t.isEmpty,
+           !tokenCandidates.contains(where: { $0.token == t })
         {
-            if !isGrokCredentialExpired(local) {
-                tokenCandidates.append(t)
-            } else {
-                tokenCandidates.append(t) // try last; better than nothing
+            let emailsMatch: Bool = {
+                guard let accountEmail, let localEmail else {
+                    // No email on the auth file — allow CLI fallback for single-account setups.
+                    return accountEmail == nil
+                }
+                return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
+            }()
+            if emailsMatch {
+                // Prefer non-expired CLI token first when it matches this identity.
+                if !isGrokCredentialExpired(localGrok) {
+                    tokenCandidates.insert((t, localEmail), at: 0)
+                } else {
+                    tokenCandidates.append((t, localEmail))
+                }
             }
         }
-        if let t = stringValue(payload, keys: ["access_token", "key"]), !t.isEmpty,
-           !tokenCandidates.contains(t)
-        {
-            // Insert proxy token only after non-expired CLI token(s).
-            if isGrokCredentialExpired(payload) {
-                tokenCandidates.append(t)
-            } else {
-                tokenCandidates.insert(t, at: min(1, tokenCandidates.count))
-            }
-        }
+
+        let displayEmail = accountEmail ?? localEmail
 
         guard !tokenCandidates.isEmpty else {
             return .empty(
                 authAccountID: authAccountID,
                 providerID: providerID,
-                accountEmail: email,
+                accountEmail: displayEmail,
                 error: "Missing Grok access token — run `grok login` or connect Grok in Settings"
             )
         }
 
         var lastError: String?
-        for token in tokenCandidates {
+        for candidate in tokenCandidates {
             let outcome = await requestGrokBilling(
-                accessToken: token,
+                accessToken: candidate.token,
                 authAccountID: authAccountID,
                 providerID: providerID,
-                email: email,
+                email: displayEmail,
                 payload: payload
             )
             switch outcome {
             case .success(let snapshot):
-                return snapshot
+                // Force account email so UI rows stay distinct across multi-account Grok.
+                return ProviderUsageSnapshot(
+                    id: snapshot.id,
+                    providerID: snapshot.providerID,
+                    source: snapshot.source,
+                    windows: snapshot.windows,
+                    subAccounts: snapshot.subAccounts,
+                    accountEmail: displayEmail,
+                    planType: snapshot.planType,
+                    planLabel: snapshot.planLabel,
+                    rateLimitResets: snapshot.rateLimitResets,
+                    updatedAt: snapshot.updatedAt,
+                    errorMessage: snapshot.errorMessage,
+                    isRefreshing: false
+                )
             case .failure(let message):
                 lastError = message
-                // Auth failures: try next token; other parse/network errors also try next.
                 continue
             }
         }
@@ -1556,7 +1578,7 @@ enum NativeUsageFetcher {
         return .empty(
             authAccountID: authAccountID,
             providerID: providerID,
-            accountEmail: email,
+            accountEmail: displayEmail,
             error: lastError ?? "Could not load Grok billing usage"
         )
     }
@@ -1693,21 +1715,31 @@ enum NativeUsageFetcher {
                 merged.merge(local) { _, new in new }
             }
         case .grok:
-            // Prefer fresh SuperGrok CLI credentials over stale cli-proxy OAuth for billing.
+            // Only fill missing fields from ~/.grok — never replace this account's token/email
+            // with a different SuperGrok identity (that caused every Grok row to look identical).
             if let local = readGrokAppPayload() {
-                let localFresh = !isGrokCredentialExpired(local)
-                let proxyFresh = !isGrokCredentialExpired(merged)
-                if localFresh || !proxyFresh {
-                    if let token = stringValue(local, keys: ["access_token", "key"]) {
+                let accountEmail = stringValue(merged, keys: ["email"])
+                let localEmail = stringValue(local, keys: ["email"])
+                let sameIdentity = {
+                    guard let accountEmail, let localEmail else { return accountEmail == nil }
+                    return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
+                }()
+                if sameIdentity {
+                    for (key, value) in local where merged[key] == nil {
+                        merged[key] = value
+                    }
+                    // If this file's token is expired and CLI matches identity, allow CLI token.
+                    if isGrokCredentialExpired(merged),
+                       !isGrokCredentialExpired(local),
+                       let token = stringValue(local, keys: ["access_token", "key"])
+                    {
                         merged["access_token"] = token
                         merged["key"] = token
                     }
-                    if let email = local["email"] { merged["email"] = email }
-                    if let refresh = local["refresh_token"] { merged["refresh_token"] = refresh }
-                    if let exp = local["expired"] ?? local["expires_at"] { merged["expired"] = exp }
                 } else {
-                    for (key, value) in local where merged[key] == nil {
-                        merged[key] = value
+                    // Different identity: only copy non-identity fallbacks if fields are empty.
+                    for key in ["refresh_token"] where merged[key] == nil {
+                        if let value = local[key] { merged[key] = value }
                     }
                 }
             }

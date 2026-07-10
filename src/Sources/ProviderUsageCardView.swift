@@ -749,8 +749,14 @@ private struct AccountUsageBlock: View {
     }
 
     private var accountLabel: String {
+        // Always prefer the auth-file identity so multi-account lists stay distinct.
+        // (Usage payloads can stamp a shared SuperGrok email onto every Grok row.)
+        let fromFile = account.baseDisplayName
+        if !fromFile.isEmpty, fromFile != account.id {
+            return fromFile
+        }
         if let email = usage?.accountEmail, !email.isEmpty { return email }
-        return account.baseDisplayName
+        return fromFile
     }
 
     private var planBadge: String? {
