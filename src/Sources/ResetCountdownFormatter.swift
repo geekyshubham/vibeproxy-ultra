@@ -40,6 +40,13 @@ enum ResetCountdownFormatter {
         return formatter.string(from: date)
     }
 
+    /// Compact date for chips (e.g. reset-credit expiry): "Jul 31".
+    static func shortDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter.string(from: date)
+    }
+
     static func shortUsedRemaining(usedPercent: Double) -> String {
         let used = min(100, max(0, usedPercent))
         let remaining = max(0, 100 - used)

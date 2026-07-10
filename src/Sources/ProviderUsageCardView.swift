@@ -560,6 +560,9 @@ private struct AccountUsageBlock: View {
     private var compactOneLiner: String? {
         if account.isExpired { return "needs re-auth" }
         if account.isDisabled { return "disabled" }
+        if let resets = usage?.rateLimitResets, resets.availableCount > 0 {
+            return "\(resets.availableCount) reset\(resets.availableCount == 1 ? "" : "s") left"
+        }
         if let plan = planBadge { return plan }
         if let reset = nextResetText { return reset }
         return nil
@@ -781,6 +784,9 @@ private struct AccountUsageBlock: View {
                     .foregroundStyle(.secondary)
             } else if !usage.subAccounts.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
+                    if let resets = usage.rateLimitResets {
+                        rateLimitResetsBadge(resets, tint: tint)
+                    }
                     ForEach(usage.subAccounts) { sub in
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 4) {
@@ -820,6 +826,9 @@ private struct AccountUsageBlock: View {
                 }
             } else if !usage.windows.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
+                    if let resets = usage.rateLimitResets {
+                        rateLimitResetsBadge(resets, tint: tint)
+                    }
                     ForEach(Array(usage.windows.enumerated()), id: \.offset) { index, window in
                         UsageQuotaRow(
                             title: quotaTitle(window, index: index),
@@ -866,5 +875,39 @@ private struct AccountUsageBlock: View {
             return ResetCountdownFormatter.resetLine(for: resetsAt)
         }
         return nil
+    }
+
+    /// Cockpit-style chip: how many manual ChatGPT/Codex rate-limit resets remain.
+    @ViewBuilder
+    private func rateLimitResetsBadge(_ resets: CodexRateLimitResetCredits, tint: Color) -> some View {
+        let hasResets = resets.availableCount > 0
+        HStack(spacing: 8) {
+            Image(systemName: hasResets ? "arrow.counterclockwise.circle.fill" : "arrow.counterclockwise.circle")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(hasResets ? tint : Color.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(resets.summaryLine)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(hasResets ? .primary : .secondary)
+                if let title = resets.sampleTitle, !title.isEmpty, hasResets {
+                    Text(title)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(hasResets ? tint.opacity(0.12) : Color.primary.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(hasResets ? tint.opacity(0.25) : Color.primary.opacity(0.06), lineWidth: 1)
+        )
+        .help("Manual rate-limit resets from ChatGPT/Codex (same inventory as Cockpit Tools)")
     }
 }

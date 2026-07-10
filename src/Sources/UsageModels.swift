@@ -124,6 +124,28 @@ struct ProviderUsagePayload: Codable, Equatable {
     let accountEmail: String?
 }
 
+/// Manual rate-limit resets (ChatGPT/Codex “Full reset” credits — Cockpit/CodexBar style).
+struct CodexRateLimitResetCredits: Equatable {
+    /// Still-usable resets (status=available and not expired).
+    let availableCount: Int
+    /// Soonest expiry among available credits, if any.
+    let nextExpiresAt: Date?
+    /// Product title e.g. "Full reset (Weekly + 5 hr)".
+    let sampleTitle: String?
+
+    var summaryLine: String {
+        if availableCount <= 0 {
+            return "No rate-limit resets left"
+        }
+        let noun = availableCount == 1 ? "reset" : "resets"
+        var line = "\(availableCount) rate-limit \(noun) left"
+        if let nextExpiresAt {
+            line += " · next expires \(ResetCountdownFormatter.shortDate(nextExpiresAt))"
+        }
+        return line
+    }
+}
+
 struct ProviderUsageSnapshot: Equatable, Identifiable {
     let id: String
     let providerID: String
@@ -137,6 +159,8 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
     let planType: String?
     /// Pretty plan / workspace label for the primary row.
     let planLabel: String?
+    /// ChatGPT/Codex flexible rate-limit reset inventory (when API exposes it).
+    let rateLimitResets: CodexRateLimitResetCredits?
     let updatedAt: Date?
     let errorMessage: String?
     let isRefreshing: Bool
@@ -154,6 +178,7 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
         accountEmail: String? = nil,
         planType: String? = nil,
         planLabel: String? = nil,
+        rateLimitResets: CodexRateLimitResetCredits? = nil,
         updatedAt: Date? = nil,
         errorMessage: String? = nil,
         isRefreshing: Bool = false
@@ -166,6 +191,7 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
         self.accountEmail = accountEmail
         self.planType = planType
         self.planLabel = planLabel
+        self.rateLimitResets = rateLimitResets
         self.updatedAt = updatedAt
         self.errorMessage = errorMessage
         self.isRefreshing = isRefreshing
@@ -193,6 +219,7 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
             accountEmail: accountEmail,
             planType: nil,
             planLabel: nil,
+            rateLimitResets: nil,
             updatedAt: updatedAt,
             errorMessage: errorMessage,
             isRefreshing: isRefreshing
@@ -215,6 +242,7 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
             accountEmail: accountEmail,
             planType: nil,
             planLabel: nil,
+            rateLimitResets: nil,
             updatedAt: nil,
             errorMessage: error,
             isRefreshing: refreshing

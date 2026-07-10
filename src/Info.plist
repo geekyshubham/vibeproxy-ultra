@@ -2,46 +2,45 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleExecutable</key>
-    <string>CLIProxyMenuBar</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.vibeproxy.app</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>VibeProxy Ultra</string>
-    <key>CFBundleDisplayName</key>
-    <string>VibeProxy Ultra</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.1.1</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleVersion</key>
-    <string>111</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2026 Geekyshubham. VibeProxy Ultra.</string>
-    <key>CFBundleGetInfoString</key>
-    <string>VibeProxy Ultra — macOS menu bar AI proxy with live usage limits for Claude Code, Codex, Gemini, Kiro, and more.</string>
-    <!-- Sparkle feed left empty — Ultra does not auto-update from third-party feeds. -->
-    <key>SUFeedURL</key>
-    <string></string>
-    <key>SUScheduledCheckInterval</key>
-    <integer>0</integer>
-    <key>SUAutomaticallyUpdate</key>
-    <false/>
-    <key>SUEnableAutomaticChecks</key>
-    <false/>
-    <key>SUPublicEDKey</key>
-    <string></string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>VibeProxy Ultra</string>
+	<key>CFBundleExecutable</key>
+	<string>CLIProxyMenuBar</string>
+	<key>CFBundleGetInfoString</key>
+	<string>VibeProxy Ultra — macOS menu bar AI proxy with live usage limits for Claude Code, Codex, Gemini, Kiro, and more.</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.vibeproxy.app</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>VibeProxy Ultra</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.1.2</string>
+	<key>CFBundleVersion</key>
+	<string>112</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Geekyshubham. VibeProxy Ultra.</string>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>SUFeedURL</key>
+	<string></string>
+	<key>SUPublicEDKey</key>
+	<string></string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>0</integer>
 </dict>
 </plist>

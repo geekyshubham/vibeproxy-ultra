@@ -166,6 +166,7 @@ final class UsageStore: ObservableObject {
                         accountEmail: existing.accountEmail ?? account.email ?? account.login,
                         planType: existing.planType,
                         planLabel: existing.planLabel,
+                        rateLimitResets: existing.rateLimitResets,
                         updatedAt: existing.updatedAt,
                         errorMessage: existing.errorMessage,
                         isRefreshing: true
@@ -339,6 +340,7 @@ final class UsageStore: ObservableObject {
                 accountEmail: snapshot.accountEmail,
                 planType: snapshot.planType,
                 planLabel: snapshot.planLabel,
+                rateLimitResets: snapshot.rateLimitResets,
                 updatedAt: snapshot.updatedAt ?? Date(),
                 errorMessage: snapshot.errorMessage,
                 isRefreshing: false
@@ -354,6 +356,7 @@ final class UsageStore: ObservableObject {
             accountEmail: snapshot.accountEmail,
             planType: snapshot.planType,
             planLabel: snapshot.planLabel,
+            rateLimitResets: snapshot.rateLimitResets,
             updatedAt: snapshot.updatedAt,
             errorMessage: "Usage limits unavailable — refresh or re-authenticate in Settings",
             isRefreshing: false

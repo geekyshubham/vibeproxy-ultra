@@ -147,6 +147,15 @@ enum NativeUsageFetcher {
             }
         }
 
+        // Flexible rate-limit reset inventory (Cockpit/CodexBar: rate-limit-reset-credits).
+        // Fetch for the primary account id so the card can show "N resets left".
+        let primaryAccountID = subAccounts.first(where: { !$0.windows.isEmpty })?.id
+            ?? storedAccountID
+        let resetCredits = await fetchCodexRateLimitResetCredits(
+            accessToken: accessToken,
+            chatGPTAccountID: primaryAccountID == email ? storedAccountID : (primaryAccountID ?? storedAccountID)
+        )
+
         // Prefer showing every discovered subscription when there are 2+ memberships.
         if subAccounts.count >= 2 {
             // Prefer highest plan rank with data as the collapsed "primary" strip.
@@ -163,6 +172,7 @@ enum NativeUsageFetcher {
                 accountEmail: email,
                 planType: primary.planType,
                 planLabel: primary.title,
+                rateLimitResets: resetCredits,
                 updatedAt: Date(),
                 errorMessage: subAccounts.allSatisfy({ $0.windows.isEmpty })
                     ? "Could not fetch Codex usage limits"
@@ -181,6 +191,7 @@ enum NativeUsageFetcher {
                 accountEmail: email,
                 planType: only.planType,
                 planLabel: only.title,
+                rateLimitResets: resetCredits,
                 updatedAt: Date(),
                 errorMessage: nil,
                 isRefreshing: false
@@ -199,6 +210,15 @@ enum NativeUsageFetcher {
                 structure: nil,
                 workspaceName: nil
             )
+            let resets: CodexRateLimitResetCredits?
+            if let resetCredits {
+                resets = resetCredits
+            } else {
+                resets = await fetchCodexRateLimitResetCredits(
+                    accessToken: accessToken,
+                    chatGPTAccountID: storedAccountID
+                )
+            }
             return ProviderUsageSnapshot(
                 id: authAccountID,
                 providerID: providerID,
@@ -208,6 +228,7 @@ enum NativeUsageFetcher {
                 accountEmail: email,
                 planType: planType,
                 planLabel: ChatGPTPlanFormatter.displayName(for: planType),
+                rateLimitResets: resets,
                 updatedAt: Date(),
                 errorMessage: nil,
                 isRefreshing: false
@@ -220,6 +241,60 @@ enum NativeUsageFetcher {
             accountEmail: email,
             error: "Could not fetch Codex usage limits"
         )
+    }
+
+    /// `GET …/wham/rate-limit-reset-credits` — manual “Full reset” inventory (Go/Plus/Pro).
+    private static func fetchCodexRateLimitResetCredits(
+        accessToken: String,
+        chatGPTAccountID: String?
+    ) async -> CodexRateLimitResetCredits? {
+        guard let url = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits") else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 8
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Codex-Desktop/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("Codex Desktop", forHTTPHeaderField: "originator")
+        request.setValue("codex-1", forHTTPHeaderField: "OpenAI-Beta")
+        if let chatGPTAccountID, !chatGPTAccountID.isEmpty {
+            request.setValue(chatGPTAccountID, forHTTPHeaderField: "ChatGPT-Account-Id")
+            request.setValue(chatGPTAccountID, forHTTPHeaderField: "ChatGPT-Account-ID")
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return nil }
+
+            let now = Date()
+            let rawCredits = json["credits"] as? [[String: Any]] ?? []
+            var available: [(expires: Date?, title: String?)] = []
+            for credit in rawCredits {
+                let status = (stringValue(credit, keys: ["status"]) ?? "").lowercased()
+                guard status == "available" else { continue }
+                let expires = parseISO8601(stringValue(credit, keys: ["expires_at", "expiresAt"]))
+                if let expires, expires <= now { continue }
+                let title = stringValue(credit, keys: ["title"])
+                available.append((expires, title))
+            }
+
+            // Prefer inventory we validated (status=available & not expired).
+            let next = available.compactMap(\.expires).sorted().first
+            let title = available.first(where: { $0.expires == next })?.title
+                ?? available.first?.title
+            return CodexRateLimitResetCredits(
+                availableCount: available.count,
+                nextExpiresAt: next,
+                sampleTitle: title
+            )
+        } catch {
+            return nil
+        }
     }
 
     private struct CodexUsageTarget {
@@ -1423,18 +1498,88 @@ enum NativeUsageFetcher {
         providerID: String,
         payload: [String: Any]
     ) async -> ProviderUsageSnapshot {
-        guard let accessToken = stringValue(payload, keys: ["access_token", "key"]) else {
-            return .empty(authAccountID: authAccountID, providerID: providerID, error: "Missing access token")
+        let email = stringValue(payload, keys: ["email"])
+            ?? stringValue(readGrokAppPayload() ?? [:], keys: ["email"])
+
+        // Prefer a fresh `~/.grok/auth.json` token. cli-proxy xAI OAuth tokens often fail
+        // GetGrokCreditsConfig with grpc-status 7 (bad-credentials) even when SuperGrok works.
+        var tokenCandidates: [String] = []
+        if let local = readGrokAppPayload(),
+           let t = stringValue(local, keys: ["access_token", "key"]),
+           !t.isEmpty
+        {
+            if !isGrokCredentialExpired(local) {
+                tokenCandidates.append(t)
+            } else {
+                tokenCandidates.append(t) // try last; better than nothing
+            }
+        }
+        if let t = stringValue(payload, keys: ["access_token", "key"]), !t.isEmpty,
+           !tokenCandidates.contains(t)
+        {
+            // Insert proxy token only after non-expired CLI token(s).
+            if isGrokCredentialExpired(payload) {
+                tokenCandidates.append(t)
+            } else {
+                tokenCandidates.insert(t, at: min(1, tokenCandidates.count))
+            }
         }
 
-        let email = stringValue(payload, keys: ["email"])
+        guard !tokenCandidates.isEmpty else {
+            return .empty(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                accountEmail: email,
+                error: "Missing Grok access token — run `grok login` or connect Grok in Settings"
+            )
+        }
+
+        var lastError: String?
+        for token in tokenCandidates {
+            let outcome = await requestGrokBilling(
+                accessToken: token,
+                authAccountID: authAccountID,
+                providerID: providerID,
+                email: email,
+                payload: payload
+            )
+            switch outcome {
+            case .success(let snapshot):
+                return snapshot
+            case .failure(let message):
+                lastError = message
+                // Auth failures: try next token; other parse/network errors also try next.
+                continue
+            }
+        }
+
+        return .empty(
+            authAccountID: authAccountID,
+            providerID: providerID,
+            accountEmail: email,
+            error: lastError ?? "Could not load Grok billing usage"
+        )
+    }
+
+    private enum GrokBillingOutcome {
+        case success(ProviderUsageSnapshot)
+        case failure(String)
+    }
+
+    private static func requestGrokBilling(
+        accessToken: String,
+        authAccountID: String,
+        providerID: String,
+        email: String?,
+        payload: [String: Any]
+    ) async -> GrokBillingOutcome {
         guard let url = URL(string: "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig") else {
-            return .empty(authAccountID: authAccountID, providerID: providerID, error: "Invalid usage URL")
+            return .failure("Invalid usage URL")
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 30
+        request.timeoutInterval = 20
         request.httpBody = Data([0x00, 0x00, 0x00, 0x00, 0x00])
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/grpc-web+proto", forHTTPHeaderField: "Content-Type")
@@ -1443,58 +1588,92 @@ enum NativeUsageFetcher {
         request.setValue("connect-es/2.1.1", forHTTPHeaderField: "x-user-agent")
         request.setValue("https://grok.com", forHTTPHeaderField: "Origin")
         request.setValue("https://grok.com/?_s=usage", forHTTPHeaderField: "Referer")
-        request.setValue("VibeProxyUltra/1.0", forHTTPHeaderField: "User-Agent")
+        // Match CodexBar UA — some edges are picky about unknown clients.
+        request.setValue("CodexBar", forHTTPHeaderField: "User-Agent")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                return .empty(authAccountID: authAccountID, providerID: providerID, error: "Invalid response")
+                return .failure("Invalid response")
             }
             if http.statusCode == 401 || http.statusCode == 403 {
-                return .empty(
-                    authAccountID: authAccountID,
-                    providerID: providerID,
-                    error: sessionInvalidMessage(
+                return .failure(
+                    sessionInvalidMessage(
                         payload: payload,
-                        reauthHint: "run `grok login` or re-authenticate in Settings"
+                        reauthHint: "run `grok login` or re-authenticate Grok in Settings"
                     )
                 )
             }
             guard (200...299).contains(http.statusCode) else {
-                return .empty(authAccountID: authAccountID, providerID: providerID, error: "Billing API returned HTTP \(http.statusCode)")
+                return .failure("Grok billing returned HTTP \(http.statusCode)")
             }
 
-            if let grpcError = grokGRPCError(from: data, payload: payload) {
-                return .empty(authAccountID: authAccountID, providerID: providerID, error: grpcError)
+            // grpc-status often lives on HTTP headers (empty body) for auth failures.
+            if let grpcError = grokGRPCError(from: data, http: http, payload: payload) {
+                return .failure(grpcError)
             }
 
             guard let parsed = parseGrokBillingResponse(data) else {
-                return .empty(authAccountID: authAccountID, providerID: providerID, error: "Could not parse billing usage")
+                if data.isEmpty {
+                    return .failure(
+                        "Grok billing returned empty usage — run `grok login` (cli-proxy tokens often cannot read SuperGrok billing)"
+                    )
+                }
+                return .failure("Could not parse Grok billing usage")
             }
 
-            // Grok product default is percentage (not absolute credits).
+            let label = grokUsageWindowLabel(resetsAt: parsed.resetsAt)
             let primary = RateWindow(
                 usedPercent: parsed.usedPercent,
-                windowMinutes: nil,
+                windowMinutes: grokWindowMinutes(resetsAt: parsed.resetsAt),
                 resetsAt: parsed.resetsAt,
                 resetDescription: parsed.resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
-                label: "Grok usage",
+                label: label,
                 displayStyle: .percent
             )
 
-            return ProviderUsageSnapshot(
-                id: authAccountID,
-                providerID: providerID,
-                source: "xAI OAuth",
-                windows: [primary],
-                accountEmail: email,
-                updatedAt: Date(),
-                errorMessage: nil,
-                isRefreshing: false
+            return .success(
+                ProviderUsageSnapshot(
+                    id: authAccountID,
+                    providerID: providerID,
+                    source: "xAI OAuth",
+                    windows: [primary],
+                    accountEmail: email,
+                    planLabel: "Grok",
+                    updatedAt: Date(),
+                    errorMessage: nil,
+                    isRefreshing: false
+                )
             )
         } catch {
-            return .empty(authAccountID: authAccountID, providerID: providerID, error: error.localizedDescription)
+            return .failure(error.localizedDescription)
         }
+    }
+
+    private static func grokUsageWindowLabel(resetsAt: Date?, now: Date = Date()) -> String {
+        guard let resetsAt else { return "Credits" }
+        let days = resetsAt.timeIntervalSince(now) / 86_400
+        if days <= 8 { return "Weekly" }
+        if days <= 40 { return "Monthly" }
+        return "Credits"
+    }
+
+    private static func grokWindowMinutes(resetsAt: Date?, now: Date = Date()) -> Int? {
+        guard let resetsAt else { return nil }
+        let days = resetsAt.timeIntervalSince(now) / 86_400
+        if days <= 8 { return 10_080 }
+        if days <= 40 { return 43_200 }
+        return nil
+    }
+
+    /// True when `expired` / `expires_at` is in the past (or unparseable as expired).
+    private static func isGrokCredentialExpired(_ payload: [String: Any], now: Date = Date()) -> Bool {
+        if let raw = stringValue(payload, keys: ["expired", "expires_at", "expiresAt"]) {
+            if let date = parseISO8601(raw) {
+                return date <= now
+            }
+        }
+        return false
     }
 
     // MARK: - Helpers
@@ -1514,9 +1693,22 @@ enum NativeUsageFetcher {
                 merged.merge(local) { _, new in new }
             }
         case .grok:
+            // Prefer fresh SuperGrok CLI credentials over stale cli-proxy OAuth for billing.
             if let local = readGrokAppPayload() {
-                for (key, value) in local where merged[key] == nil {
-                    merged[key] = value
+                let localFresh = !isGrokCredentialExpired(local)
+                let proxyFresh = !isGrokCredentialExpired(merged)
+                if localFresh || !proxyFresh {
+                    if let token = stringValue(local, keys: ["access_token", "key"]) {
+                        merged["access_token"] = token
+                        merged["key"] = token
+                    }
+                    if let email = local["email"] { merged["email"] = email }
+                    if let refresh = local["refresh_token"] { merged["refresh_token"] = refresh }
+                    if let exp = local["expired"] ?? local["expires_at"] { merged["expired"] = exp }
+                } else {
+                    for (key, value) in local where merged[key] == nil {
+                        merged[key] = value
+                    }
                 }
             }
         default:
@@ -1875,21 +2067,42 @@ extension NativeUsageFetcher {
         let totalCredits: Double?
     }
 
-    private static func grokGRPCError(from data: Data, payload: [String: Any] = [:]) -> String? {
-        let trailerFields = grokGRPCWebTrailerFields(from: data)
-        guard let rawStatus = trailerFields["grpc-status"],
+    private static func grokGRPCError(
+        from data: Data,
+        http: HTTPURLResponse? = nil,
+        payload: [String: Any] = [:]
+    ) -> String? {
+        var fields = grokGRPCWebTrailerFields(from: data)
+        // Empty-body failures put grpc-status on HTTP headers (CodexBar does the same).
+        if let http {
+            for (key, value) in http.allHeaderFields {
+                let k = String(describing: key).lowercased()
+                guard k.hasPrefix("grpc-") else { continue }
+                if fields[k] == nil {
+                    fields[k] = String(describing: value)
+                        .removingPercentEncoding?
+                        .replacingOccurrences(of: "+", with: " ")
+                        ?? String(describing: value)
+                }
+            }
+        }
+        guard let rawStatus = fields["grpc-status"],
               let status = Int(rawStatus),
               status != 0
         else { return nil }
 
-        let message = trailerFields["grpc-message"]?
+        let message = (fields["grpc-message"] ?? "Billing request failed")
+            .removingPercentEncoding?
             .replacingOccurrences(of: "+", with: " ")
             ?? "Billing request failed"
-        if status == 16 || message.localizedCaseInsensitiveContains("unauthenticated") {
-            return sessionInvalidMessage(
-                payload: payload,
-                reauthHint: "run `grok login` or re-authenticate in Settings"
-            )
+        let lower = message.lowercased()
+        if status == 16
+            || status == 7
+            || lower.contains("unauthenticated")
+            || lower.contains("bad-credentials")
+            || lower.contains("could not be validated")
+        {
+            return "Grok billing rejected this token — run `grok login` (cli-proxy xAI tokens often cannot read SuperGrok usage)"
         }
         return message
     }
