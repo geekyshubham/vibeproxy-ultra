@@ -32,7 +32,7 @@ jobs:
   build-signed:
     name: Build and Sign macOS App (${{ matrix.arch }})
     needs: get-cliproxy-version
-    runs-on: macos-14  # macOS Sonoma on Apple Silicon (M1)
+    runs-on: macos-26  # macOS Tahoe — required for the Liquid Glass (macOS 26) SDK
     strategy:
       matrix:
         include:
@@ -51,10 +51,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Swift
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "5.9"
+      - name: Select Xcode 26 (Liquid Glass SDK / Swift 6.2+)
+        run: sudo xcode-select -s /Applications/Xcode.app
 
       - name: Import Code Signing Certificates
         uses: apple-actions/import-codesign-certs@v2
