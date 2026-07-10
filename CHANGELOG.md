@@ -4,6 +4,15 @@ All notable changes to **VibeProxy Ultra** are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-07-10
+
+### Fixed
+- **Grok usage limits** — Prefer valid `~/.grok/auth.json` tokens over stale cli-proxy OAuth for SuperGrok billing (`GetGrokCreditsConfig`). Empty-body `grpc-status: 7` (bad-credentials) is reported clearly instead of “Could not parse billing usage”.
+- **ChatGPT/Codex rate-limit resets** — Fetch `wham/rate-limit-reset-credits` and show remaining manual resets (Cockpit-style) on the usage card.
+
+### Changed
+- Version **1.1.2**.
+
 ## [1.1.1] - 2026-07-09
 
 ### Fixed
@@ -57,6 +66,8 @@ Initial VibeProxy Ultra release — usage limits, account import, session reliab
 - Analytics accuracy (Codex deltas, model name validation, Gemini/Antigravity double-count)
 - False session expiry when refresh token remains valid
 
+[1.1.2]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.2
+[1.1.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.1
 [1.1.0]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.0
 [1.0.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.0.0
