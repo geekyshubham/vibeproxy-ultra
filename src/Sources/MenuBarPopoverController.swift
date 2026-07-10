@@ -67,11 +67,22 @@ final class MenuBarPopoverController: NSObject, NSPopoverDelegate {
     private func showPopover() {
         guard let button = statusItem?.button else { return }
 
+        // Determine the popover height EXPLICITLY (not content-driven). An NSPopover
+        // otherwise grows to fit its SwiftUI content and, with many providers, runs
+        // off the top of the screen. We compute a height that fits below the menu bar
+        // and above the Dock (reserving room for the popover arrow), then force it via
+        // `contentSize` + `sizingOptions = []` so the ScrollView scrolls inside a
+        // fixed frame instead of expanding the window.
+        let screen = button.window?.screen ?? NSScreen.main
+        let visibleHeight = screen?.visibleFrame.height ?? 800
+        let panelHeight = max(400, min(visibleHeight - 56, 820))
+
         let panelView = MenuBarPanelView(
             serverManager: serverManager,
             authManager: authManager,
             usageStore: usageStore,
             proxyPort: Int(thinkingProxy.proxyPort),
+            panelHeight: panelHeight,
             onOpenSettings: { [weak self] in
                 self?.closePopover()
                 self?.onOpenSettings()
@@ -91,7 +102,13 @@ final class MenuBarPopoverController: NSObject, NSPopoverDelegate {
             }
         )
 
-        popover.contentViewController = NSHostingController(rootView: panelView)
+        let hosting = NSHostingController(rootView: panelView)
+        // Stop the hosting controller from resizing the popover to fit content.
+        hosting.sizingOptions = []
+        let size = NSSize(width: MenuBarDesign.panelWidth, height: panelHeight)
+        hosting.preferredContentSize = size
+        popover.contentViewController = hosting
+        popover.contentSize = size
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         installOutsideClickMonitors()
     }

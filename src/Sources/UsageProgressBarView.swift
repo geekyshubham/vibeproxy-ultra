@@ -75,6 +75,8 @@ struct UsageProgressBarView: View {
     let tint: Color
     var fillRepresentsUsed: Bool = true
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private var clamped: Double {
         min(100, max(0, percent))
     }
@@ -87,13 +89,25 @@ struct UsageProgressBarView: View {
                 Capsule()
                     .fill(
                         LinearGradient(
-                            colors: [tint.opacity(0.95), tint.opacity(0.55)],
+                            colors: [tint.opacity(0.95), tint.opacity(0.6)],
                             startPoint: .leading,
                             endPoint: .trailing
                         )
                     )
+                    .overlay(
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color.white.opacity(0.35), Color.clear],
+                                    startPoint: .top,
+                                    endPoint: .center
+                                )
+                            )
+                            .blendMode(.plusLighter)
+                    )
                     .frame(width: max(0, proxy.size.width * clamped / 100))
-                    .animation(.easeOut(duration: 0.35), value: clamped)
+                    .shadow(color: tint.opacity(clamped >= 85 ? 0.45 : 0), radius: 3)
+                    .animation(reduceMotion ? nil : DS.Motion.spring, value: clamped)
             }
         }
         .frame(height: 7)

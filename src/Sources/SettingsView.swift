@@ -13,7 +13,7 @@ struct AccountRowView: View {
     var body: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(account.isDisabled ? Color.gray : (account.isExpired ? Color.orange : Color.green))
+                .fill(account.isDisabled ? Color.secondary.opacity(0.6) : (account.isExpired ? MenuBarDesign.warning : MenuBarDesign.success))
                 .frame(width: 6, height: 6)
             Text(account.displayName)
                 .font(.caption)
@@ -34,7 +34,7 @@ struct AccountRowView: View {
                 Button(action: onToggleDisabled) {
                     Text(account.isDisabled ? "Enable" : "Disable")
                         .font(.caption)
-                        .foregroundColor(account.isDisabled ? .green : (canDisable ? .orange : .secondary.opacity(0.4)))
+                        .foregroundColor(account.isDisabled ? MenuBarDesign.success : (canDisable ? MenuBarDesign.warning : .secondary.opacity(0.4)))
                 }
                 .buttonStyle(.plain)
                 .disabled(!canDisable)
@@ -90,7 +90,7 @@ struct VercelGatewayControls: View {
                     if showingSaved {
                         Text("Saved")
                             .font(.caption)
-                            .foregroundColor(.green)
+                            .foregroundColor(MenuBarDesign.success)
                     } else {
                         Button("Save") {
                             showingSaved = true
@@ -135,7 +135,7 @@ struct ServiceRow<ExtraContent: View>: View {
 
     private var activeCount: Int { accounts.filter { !$0.isExpired }.count }
     private var expiredCount: Int { accounts.filter { $0.isExpired }.count }
-    private let removeColor = Color(red: 0xeb/255, green: 0x0f/255, blue: 0x0f/255)
+    private let removeColor = MenuBarDesign.danger
     
     private var displayTitle: String {
         customTitle ?? serviceType.displayName
@@ -161,10 +161,12 @@ struct ServiceRow<ExtraContent: View>: View {
                         .resizable()
                         .renderingMode(.template)
                         .frame(width: 20, height: 20)
+                        .foregroundStyle(isEnabled ? MenuBarDesign.providerTint(for: serviceType) : Color.secondary)
                         .opacity(isEnabled ? 1.0 : 0.4)
                 } else if let iconSystemName {
                     Image(systemName: iconSystemName)
                         .frame(width: 20, height: 20)
+                        .foregroundStyle(isEnabled ? MenuBarDesign.providerTint(for: serviceType) : Color.secondary)
                         .opacity(isEnabled ? 1.0 : 0.4)
                 }
                 Text(displayTitle)
@@ -190,7 +192,7 @@ struct ServiceRow<ExtraContent: View>: View {
                     HStack(spacing: 4) {
                         Text("\(accounts.count) connected account\(accounts.count == 1 ? "" : "s")")
                             .font(.caption)
-                            .foregroundColor(.green)
+                            .foregroundColor(MenuBarDesign.success)
 
                         if enabledCount > 1 {
                             Text("• Round-robin w/ auto-failover")
@@ -291,7 +293,7 @@ struct CustomProviderCredentialRowView: View {
     var body: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(credential.isDisabled ? Color.gray : Color.green)
+                .fill(credential.isDisabled ? Color.secondary.opacity(0.6) : MenuBarDesign.success)
                 .frame(width: 6, height: 6)
             Text(credential.label)
                 .font(.caption)
@@ -307,7 +309,7 @@ struct CustomProviderCredentialRowView: View {
                 Button(action: onToggleDisabled) {
                     Text(credential.isDisabled ? "Enable" : "Disable")
                         .font(.caption)
-                        .foregroundColor(credential.isDisabled ? .green : (canDisable ? .orange : .secondary.opacity(0.4)))
+                        .foregroundColor(credential.isDisabled ? MenuBarDesign.success : (canDisable ? MenuBarDesign.warning : .secondary.opacity(0.4)))
                 }
                 .buttonStyle(.plain)
                 .disabled(!canDisable)
@@ -357,7 +359,7 @@ struct CustomProviderRow: View {
     private var enabledCredentialCount: Int { credentials.filter { !$0.isDisabled }.count }
     private var totalConfiguredKeyCount: Int { credentials.count + provider.inlineKeyCount }
     private var totalEnabledKeyCount: Int { enabledCredentialCount + provider.inlineKeyCount }
-    private let removeColor = Color(red: 0xeb/255, green: 0x0f/255, blue: 0x0f/255)
+    private let removeColor = MenuBarDesign.danger
     
     private var summaryText: String {
         if totalConfiguredKeyCount == 0 {
@@ -449,7 +451,7 @@ struct CustomProviderRow: View {
                     HStack(spacing: 4) {
                         Text(summaryText)
                             .font(.caption)
-                            .foregroundColor(.green)
+                            .foregroundColor(MenuBarDesign.success)
                         
                         if let poolingStatusText {
                             Text(poolingStatusText)
@@ -565,6 +567,15 @@ struct SettingsView: View {
         case status = "Status"
         var id: String { rawValue }
     }
+
+    private func paneIcon(for pane: SettingsPane) -> String {
+        switch pane {
+        case .providers: return "square.stack.3d.up.fill"
+        case .preferences: return "slider.horizontal.3"
+        case .analytics: return "chart.bar.fill"
+        case .status: return "dot.radiowaves.left.and.right"
+        }
+    }
     
     private enum Timing {
         static let serverRestartDelay: TimeInterval = 0.3
@@ -604,15 +615,17 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $settingsPane) {
-                ForEach(SettingsPane.allCases) { pane in
-                    Text(pane.rawValue).tag(pane)
-                }
-            }
-            .pickerStyle(.segmented)
+            SegmentedTabBar(
+                tabs: SettingsPane.allCases,
+                selection: $settingsPane,
+                title: { $0.rawValue },
+                icon: { paneIcon(for: $0) }
+            )
             .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
+
+            Divider().opacity(0.4)
 
             ScrollView {
                 switch settingsPane {
@@ -632,12 +645,11 @@ struct SettingsView: View {
                 }
             } // ScrollView
 
-            Spacer()
-                .frame(height: 6)
+            Divider().opacity(0.4)
 
             settingsFooter
         }
-        .frame(minWidth: 480, idealWidth: 520, minHeight: 520)
+        .frame(minWidth: 560, idealWidth: 620, minHeight: 560, idealHeight: 720)
         .sheet(isPresented: $showingQwenEmailPrompt) {
             qwenEmailSheet
         }
@@ -680,14 +692,18 @@ struct SettingsView: View {
                                 serverManager.start { _ in }
                             }
                         }) {
-                            HStack(spacing: 6) {
+                            HStack(spacing: 7) {
                                 Circle()
-                                    .fill(serverManager.isRunning ? Color.green : Color.red)
+                                    .fill(serverManager.isRunning ? MenuBarDesign.success : MenuBarDesign.danger)
                                     .frame(width: 8, height: 8)
                                 Text(serverManager.isRunning ? "Running" : "Stopped")
+                                    .foregroundStyle(serverManager.isRunning ? MenuBarDesign.success : MenuBarDesign.danger)
+                                    .fontWeight(.medium)
                             }
                         }
                         .buttonStyle(.plain)
+                        .pointerCursor()
+                        .help(serverManager.isRunning ? "Stop the local proxy" : "Start the local proxy")
                     }
                 }
 
@@ -695,7 +711,7 @@ struct SettingsView: View {
                     Section("Configuration Error") {
                         Text(configErrorMessage)
                             .font(.caption)
-                            .foregroundColor(.red)
+                            .foregroundColor(MenuBarDesign.danger)
                     }
                 }
 

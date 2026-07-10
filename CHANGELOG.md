@@ -4,6 +4,21 @@ All notable changes to **VibeProxy Ultra** are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-10
+
+Full menu bar + Settings UI/UX revamp with Apple **Liquid Glass** styling on macOS 26 (Tahoe), backward compatible with earlier macOS.
+
+### Added
+- **Liquid Glass** (macOS 26+) — cards, tiles, buttons, and the segmented tab pill use `.glassEffect`; automatically falls back to the existing translucent material on macOS 13–15 via `if #available`.
+- Shared design system: spacing/motion tokens, a sliding segmented tab bar, hover-aware button styles, animated stat tiles, and a pulsing live-status dot.
+
+### Changed
+- **Menu bar panel** — pulsing live-status header, icon tabs with a sliding indicator, richer overview strip, redesigned footer, and a clear "Connect a provider" empty state with a call to action.
+- **Provider cards, usage bars & analytics** — hover highlights, springier expand/collapse, glossy animated progress bars, and per-provider colored analytics bars.
+- **Settings window** — right-sized (was oversized), consistent tabbed navigation with icons, brand-tinted provider icons, and unified color tokens.
+- **Panel sizing** — screen-aware height with an explicit popover size so the whole panel always fits on screen (fixes off-screen overflow with many providers).
+- Version **1.2.0**.
+
 ## [1.1.2] - 2026-07-10
 
 ### Fixed
@@ -66,6 +81,7 @@ Initial VibeProxy Ultra release — usage limits, account import, session reliab
 - Analytics accuracy (Codex deltas, model name validation, Gemini/Antigravity double-count)
 - False session expiry when refresh token remains valid
 
+[1.2.0]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.0
 [1.1.2]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.2
 [1.1.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.1
 [1.1.0]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.0

@@ -95,8 +95,10 @@ struct AboutView: View {
 
     private func bullet(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Text("•")
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(MenuBarDesign.accent)
+                .padding(.top, 1)
             Text(text)
                 .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)

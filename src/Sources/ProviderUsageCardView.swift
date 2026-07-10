@@ -70,7 +70,7 @@ struct ProviderUsageCardView: View {
                     accountsSection
                     if hiddenCount > 0 {
                         Button {
-                            withAnimation(.easeInOut(duration: 0.15)) { showAllAccounts = true }
+                            withAnimation(DS.Motion.expand) { showAllAccounts = true }
                         } label: {
                             Text("Show \(hiddenCount) more account\(hiddenCount == 1 ? "" : "s")…")
                                 .font(.caption2.weight(.semibold))
@@ -79,7 +79,7 @@ struct ProviderUsageCardView: View {
                         .buttonStyle(.plain)
                     } else if showAllAccounts && usesCompactList && sortedAccounts.count > 3 {
                         Button {
-                            withAnimation(.easeInOut(duration: 0.15)) {
+                            withAnimation(DS.Motion.expand) {
                                 showAllAccounts = false
                                 // Keep selection if still visible
                                 if let id = expandedAccountID,
@@ -106,7 +106,8 @@ struct ProviderUsageCardView: View {
             }
         }
         .padding(MenuBarDesign.cardPadding)
-        .background(GlassCardBackground(tint: tint))
+        .cardSurface(tint: tint)
+        .hoverHighlight(tint)
         .onAppear {
             showAllAccounts = false
             if isSingleAccount {
@@ -126,7 +127,7 @@ struct ProviderUsageCardView: View {
 
     private var header: some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(DS.Motion.expand) {
                 isProviderExpanded.toggle()
             }
         } label: {
@@ -278,7 +279,7 @@ struct ProviderUsageCardView: View {
                     nativeSession: nativeSession,
                     proxyPort: proxyPort,
                     onToggleExpand: usesCompactList ? {
-                        withAnimation(.easeInOut(duration: 0.15)) {
+                        withAnimation(DS.Motion.expand) {
                             if expandedAccountID == account.id {
                                 expandedAccountID = nil
                             } else {

@@ -4,6 +4,7 @@ import SwiftUI
 struct AnalyticsDashboardView: View {
     @ObservedObject var usageStore: UsageStore
     @ObservedObject private var settings = AppSettings.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var compact: Bool = false
 
     private var overview: AnalyticsOverview? { usageStore.analytics }
@@ -50,36 +51,22 @@ struct AnalyticsDashboardView: View {
     }
 
     private func totalsGrid(_ overview: AnalyticsOverview) -> some View {
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-            metricCard(
-                title: "30-day volume",
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: DS.Space.md) {
+            StatTile(
+                label: "30-day volume",
                 value: formatTokens(overview.totalTokens30d),
-                subtitle: settings.showCostEstimates ? formatUSD(overview.totalCostUSD30d) : ""
+                sublabel: settings.showCostEstimates ? formatUSD(overview.totalCostUSD30d) : nil,
+                systemImage: "calendar",
+                tint: MenuBarDesign.accent
             )
-            metricCard(
-                title: "Today volume",
+            StatTile(
+                label: "Today",
                 value: formatTokens(overview.totalTokensSession),
-                subtitle: settings.showCostEstimates ? formatUSD(overview.totalCostUSDSession) : ""
+                sublabel: settings.showCostEstimates ? formatUSD(overview.totalCostUSDSession) : nil,
+                systemImage: "sun.max.fill",
+                tint: MenuBarDesign.accent
             )
         }
-    }
-
-    private func metricCard(title: String, value: String, subtitle: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(.title3, design: .rounded).weight(.bold))
-            if !subtitle.isEmpty {
-                Text(subtitle)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(MenuBarDesign.accent)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(GlassCardBackground(tint: MenuBarDesign.accent))
     }
 
     private func providerSection(_ overview: AnalyticsOverview) -> some View {
@@ -98,8 +85,12 @@ struct AnalyticsDashboardView: View {
         let peers = overview.byProvider.filter { $0.volumeUnit == provider.volumeUnit }
         let peerTotal = max(1, peers.reduce(0) { $0 + $1.last30DaysTokens })
         let share = Double(provider.last30DaysTokens) / Double(peerTotal)
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack {
+        let tint = providerTint(for: provider.providerID)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 7, height: 7)
                 Text(displayName(for: provider.providerID))
                     .font(.caption.weight(.semibold))
                 Spacer()
@@ -116,11 +107,34 @@ struct AnalyticsDashboardView: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.primary.opacity(0.06))
                     Capsule()
-                        .fill(MenuBarDesign.accent.opacity(0.85))
+                        .fill(
+                            LinearGradient(
+                                colors: [tint.opacity(0.95), tint.opacity(0.6)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
                         .frame(width: max(4, proxy.size.width * share))
+                        .animation(reduceMotion ? nil : DS.Motion.spring, value: share)
                 }
             }
-            .frame(height: 5)
+            .frame(height: 6)
+        }
+    }
+
+    /// Maps an analytics provider ID to its brand tint (falls back to the app accent).
+    private func providerTint(for providerID: String) -> Color {
+        switch providerID.lowercased() {
+        case "codex": return MenuBarDesign.providerTint(for: .codex)
+        case "claude": return MenuBarDesign.providerTint(for: .claude)
+        case "gemini": return MenuBarDesign.providerTint(for: .gemini)
+        case "copilot": return MenuBarDesign.providerTint(for: .copilot)
+        case "antigravity": return MenuBarDesign.providerTint(for: .antigravity)
+        case "kiro": return MenuBarDesign.providerTint(for: .kiro)
+        case "zai", "z.ai": return MenuBarDesign.providerTint(for: .zai)
+        case "kimi": return MenuBarDesign.providerTint(for: .kimi)
+        case "qwen": return MenuBarDesign.providerTint(for: .qwen)
+        default: return MenuBarDesign.accent
         }
     }
 
@@ -160,7 +174,7 @@ struct AnalyticsDashboardView: View {
             }
         }
         .padding(10)
-        .background(GlassCardBackground(tint: Color.purple))
+        .cardSurface(tint: MenuBarDesign.accent)
     }
 
     private func modelDetailLine(_ model: ModelTokenUsage) -> String {
@@ -195,7 +209,7 @@ struct AnalyticsDashboardView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(12)
-        .background(GlassCardBackground(tint: .secondary))
+        .cardSurface(tint: .secondary)
     }
 
     private var footnote: some View {
@@ -348,7 +362,8 @@ struct StatusIncidentsView: View {
             }
         }
         .padding(10)
-        .background(GlassCardBackground(tint: statusColor(status.level)))
+        .cardSurface(tint: statusColor(status.level))
+        .hoverHighlight(statusColor(status.level))
     }
 
     private func statusColor(_ level: ProviderStatusLevel) -> Color {

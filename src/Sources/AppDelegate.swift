@@ -290,12 +290,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
     func createSettingsWindow() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1000, height: 900),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "VibeProxy Ultra"
+        window.setContentSize(NSSize(width: 640, height: 720))
+        window.minSize = NSSize(width: 560, height: 560)
         window.center()
         window.delegate = self
         window.isReleasedWhenClosed = false
