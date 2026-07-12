@@ -86,13 +86,22 @@ struct AnalyticsDashboardView: View {
         let peerTotal = max(1, peers.reduce(0) { $0 + $1.last30DaysTokens })
         let share = Double(provider.last30DaysTokens) / Double(peerTotal)
         let tint = providerTint(for: provider.providerID)
+        let todayUSD = provider.sessionCostUSD ?? 0
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Circle()
                     .fill(tint)
                     .frame(width: 7, height: 7)
-                Text(displayName(for: provider.providerID))
-                    .font(.caption.weight(.semibold))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(displayName(for: provider.providerID))
+                        .font(.caption.weight(.semibold))
+                    // Surface today's $ so a Kiro-only total isn't mistaken for "Grok is missing".
+                    if settings.showCostEstimates, todayUSD >= 0.01 {
+                        Text("today \(formatUSD(todayUSD))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 Text(formatVolume(provider.last30DaysTokens, unit: provider.volumeUnit))
                     .font(.caption.monospacedDigit())

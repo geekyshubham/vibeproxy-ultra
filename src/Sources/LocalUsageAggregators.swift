@@ -282,12 +282,15 @@ enum LocalGrokUsage {
             guard url.lastPathComponent == "signals.json" else { continue }
             guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { continue }
             let mtime = values.contentModificationDate ?? .distantPast
-            guard mtime >= cutoff else { continue }
+            // Prefer summary.json updated_at/created_at when present so a session whose
+            // signals.json wasn't rewritten still lands on the day it was last active.
+            let activity = sessionActivityDate(sessionDir: url.deletingLastPathComponent()) ?? mtime
+            guard activity >= cutoff || mtime >= cutoff else { continue }
             let size = values.fileSize ?? 0
             let path = url.standardizedFileURL.resolvingSymlinksInPath().path
             live.insert(path)
 
-            let parsed = parseSignals(path: path, url: url, mtime: mtime, size: size)
+            let parsed = parseSignals(path: path, url: url, mtime: mtime, activity: activity, size: size)
             guard parsed.tokens > 0 else { continue }
 
             var bucket = modelBuckets[parsed.model] ?? ModelBucket()
@@ -318,7 +321,8 @@ enum LocalGrokUsage {
                 cacheReadTokens: b.cacheRead,
                 totalTokens: b.total,
                 estimatedCostUSD: b.cost,
-                requestCount: b.requests
+                requestCount: b.requests,
+                volumeUnit: .estimatedTokens
             )
         }
         .sorted { $0.totalTokens > $1.totalTokens }
@@ -330,6 +334,7 @@ enum LocalGrokUsage {
             last30DaysTokens: historyTokens,
             last30DaysCostUSD: historyCost,
             models: models,
+            volumeUnit: .estimatedTokens,
             updatedAt: now
         )
     }
@@ -343,15 +348,35 @@ enum LocalGrokUsage {
         var cost = 0.0
     }
 
-    private static func parseSignals(path: String, url: URL, mtime: Date, size: Int) -> (tokens: Int, cost: Double, model: String, day: Int, requests: Int) {
+    /// Best activity timestamp for a Grok session dir: summary `updated_at` → `created_at` → nil.
+    private static func sessionActivityDate(sessionDir: URL) -> Date? {
+        let summaryURL = sessionDir.appendingPathComponent("summary.json")
+        guard let data = try? Data(contentsOf: summaryURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        if let updated = json["updated_at"] as? String, let d = parseGrokDate(updated) { return d }
+        if let created = json["created_at"] as? String, let d = parseGrokDate(created) { return d }
+        return nil
+    }
+
+    private static func parseGrokDate(_ raw: String) -> Date? {
+        ISO8601DateFormatter.kiro.date(from: raw) ?? ISO8601DateFormatter.kiroFractional.date(from: raw)
+    }
+
+    private static func parseSignals(path: String, url: URL, mtime: Date, activity: Date, size: Int) -> (tokens: Int, cost: Double, model: String, day: Int, requests: Int) {
+        // Day = last activity (summary updated_at / signals mtime). Whole-session estimate
+        // lands on that day — multi-day split would need per-turn updates.jsonl sums.
+        let day = dayKey(for: activity)
         cacheLock.lock()
         if let c = fileCache[path], c.mtime == mtime, c.size == size {
+            // Re-bucket when activity day moved but signals body is unchanged.
+            if c.day != day {
+                fileCache[path] = (mtime, size, c.tokens, c.cost, c.model, day, c.requests)
+            }
             cacheLock.unlock()
-            return (c.tokens, c.cost, c.model, c.day, c.requests)
+            return (c.tokens, c.cost, c.model, day, c.requests)
         }
         cacheLock.unlock()
-
-        let day = dayKey(for: mtime)
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {

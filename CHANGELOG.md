@@ -4,6 +4,18 @@ All notable changes to **VibeProxy Ultra** are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-07-12
+
+### Fixed
+- **Today $ undercount (Grok)** — Running builds before 1.2.1 treated Grok `contextTokensUsed` as total usage (often &lt;$1/day) while Kiro alone filled the Today tile (~$16). Cumulative turn estimate + Composer pricing restore Grok’s share.
+- **Grok day bucket** — Prefer `summary.json` `updated_at`/`created_at` over signals mtime so active sessions aren’t dropped from Today.
+- **Cost re-scan freshness** — Activity probe walks one level of session dirs so nested Grok/Kiro writes trigger a rescan (root dir mtime often stayed stale).
+
+### Changed
+- Analytics provider rows show **today $** under each name so Kiro vs Grok vs Codex is obvious.
+- Grok volume marked as estimated tokens.
+- Version **1.2.2**.
+
 ## [1.2.1] - 2026-07-12
 
 Analytics accuracy and live model pricing.
@@ -100,6 +112,7 @@ Initial VibeProxy Ultra release — usage limits, account import, session reliab
 - Analytics accuracy (Codex deltas, model name validation, Gemini/Antigravity double-count)
 - False session expiry when refresh token remains valid
 
+[1.2.2]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.2
 [1.2.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.0
 [1.1.2]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.2

@@ -27,11 +27,10 @@ final class UsageStore: ObservableObject {
     private var lastCostScanAt: Date?
     private let costScanMinInterval: TimeInterval = 15 * 60
 
-    /// Cheap freshness probe: newest mtime among the local-usage session roots. When one
-    /// advances, a CLI tool just wrote a session (e.g. a Kiro turn flushed), so we re-scan
-    /// instead of waiting out the throttle. The per-file scan cache keeps this inexpensive.
-    /// ponytail: dir-mtime heuristic — catches added/rewritten session files (atomic writes
-    /// bump the parent dir); may miss pure in-place appends until the throttle window elapses.
+    /// Cheap freshness probe: newest mtime among local-usage roots *and one level of
+    /// children*. Nested trees (e.g. `~/.grok/sessions/<project>/<id>/signals.json`) do not
+    /// always bump the grandparent dir mtime, so a root-only probe missed Grok/Kiro flushes.
+    /// ponytail: shallow walk capped at 400 entries — deep trees wait for the throttle window.
     private func newestLocalUsageActivity() -> Date? {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let roots = [
@@ -39,15 +38,31 @@ final class UsageStore: ObservableObject {
             ".claude/projects", ".codex/sessions", ".gemini/tmp",
             ".local/share/opencode", ".opencode",
         ]
+        let fm = FileManager.default
         var newest: Date?
+        var budget = 400
         for rel in roots {
-            let path = home.appendingPathComponent(rel).path
-            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-                  let mtime = attrs[.modificationDate] as? Date
+            let url = home.appendingPathComponent(rel)
+            if let m = modificationDate(at: url), newest == nil || m > newest! { newest = m }
+            guard budget > 0,
+                  let kids = try? fm.contentsOfDirectory(
+                      at: url,
+                      includingPropertiesForKeys: [.contentModificationDateKey],
+                      options: [.skipsHiddenFiles]
+                  )
             else { continue }
-            if newest == nil || mtime > newest! { newest = mtime }
+            for kid in kids {
+                guard budget > 0 else { break }
+                budget -= 1
+                if let m = modificationDate(at: kid), newest == nil || m > newest! { newest = m }
+            }
         }
         return newest
+    }
+
+    private func modificationDate(at url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            ?? (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date)
     }
 
     func startAutoRefresh(immediate: Bool = true) {
