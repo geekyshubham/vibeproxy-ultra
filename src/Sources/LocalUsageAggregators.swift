@@ -182,17 +182,16 @@ enum LocalKiroCredits {
         let turns = ((sessionState?["conversation_metadata"] as? [String: Any])?["user_turn_metadatas"] as? [[String: Any]])
             ?? []
 
-        let fileDay = dayKey(for: mtime)
+        // A resumed/rewritten session has mtime=today but may hold turns from earlier days.
+        // Fall back to the session's stable created_at day (written once), NOT the file's
+        // rewrite time, so prior-day turns can't spill into "today". Per-turn end_timestamp
+        // still wins when present.
+        let fallbackDay = (json["created_at"] as? String).flatMap(parseKiroDate).map { dayKey(for: $0) }
+            ?? dayKey(for: mtime)
         for turn in turns {
             let credits = sumCredits(turn["metering_usage"])
             guard credits > 0 else { continue }
-            var tsDay = fileDay
-            if let end = turn["end_timestamp"] as? String,
-               let date = ISO8601DateFormatter.kiro.date(from: end)
-                ?? ISO8601DateFormatter.kiroFractional.date(from: end)
-            {
-                tsDay = dayKey(for: date)
-            }
+            let tsDay = resolveTurnDayKey(endTimestamp: turn["end_timestamp"] as? String, fallbackDayKey: fallbackDay)
             dayCredits[tsDay, default: 0] += credits
             var models = dayModels[tsDay] ?? [:]
             var bucket = models[model] ?? (0, 0)
@@ -221,6 +220,20 @@ enum LocalKiroCredits {
         return total
     }
 
+    /// Parse a Kiro ISO8601 timestamp (plain or 6-digit fractional microseconds).
+    static func parseKiroDate(_ raw: String) -> Date? {
+        ISO8601DateFormatter.kiro.date(from: raw) ?? ISO8601DateFormatter.kiroFractional.date(from: raw)
+    }
+
+    /// Day bucket for a turn: its own `end_timestamp` when parseable, otherwise the session's
+    /// stable fallback day (created_at, never the file's mtime). `internal` for the self-check.
+    static func resolveTurnDayKey(endTimestamp: String?, fallbackDayKey: Int) -> Int {
+        if let end = endTimestamp, let date = parseKiroDate(end) {
+            return dayKey(for: date)
+        }
+        return fallbackDayKey
+    }
+
     private static func dayKey(for date: Date) -> Int {
         Int(Calendar.current.startOfDay(for: date).timeIntervalSince1970)
     }
@@ -243,7 +256,7 @@ private extension ISO8601DateFormatter {
 
 enum LocalGrokUsage {
     private static let cacheLock = NSLock()
-    private static var fileCache: [String: (mtime: Date, size: Int, tokens: Int, cost: Double, model: String, day: Int)] = [:]
+    private static var fileCache: [String: (mtime: Date, size: Int, tokens: Int, cost: Double, model: String, day: Int, requests: Int)] = [:]
 
     static func costSnapshot(now: Date = Date(), historyDays: Int = 30) -> ProviderCostSnapshot? {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -281,7 +294,7 @@ enum LocalGrokUsage {
             bucket.total += parsed.tokens
             bucket.input += parsed.tokens
             bucket.cost += parsed.cost
-            bucket.requests += 1
+            bucket.requests += parsed.requests
             modelBuckets[parsed.model] = bucket
 
             historyTokens += parsed.tokens
@@ -330,11 +343,11 @@ enum LocalGrokUsage {
         var cost = 0.0
     }
 
-    private static func parseSignals(path: String, url: URL, mtime: Date, size: Int) -> (tokens: Int, cost: Double, model: String, day: Int) {
+    private static func parseSignals(path: String, url: URL, mtime: Date, size: Int) -> (tokens: Int, cost: Double, model: String, day: Int, requests: Int) {
         cacheLock.lock()
         if let c = fileCache[path], c.mtime == mtime, c.size == size {
             cacheLock.unlock()
-            return (c.tokens, c.cost, c.model, c.day)
+            return (c.tokens, c.cost, c.model, c.day, c.requests)
         }
         cacheLock.unlock()
 
@@ -342,13 +355,18 @@ enum LocalGrokUsage {
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            return (0, 0, "grok", day)
+            return (0, 0, "grok", day, 0)
         }
 
         let before = intValue(json["totalTokensBeforeCompaction"])
         let context = intValue(json["contextTokensUsed"])
-        // CodexBar GrokLocalSessionScanner: beforeCompaction + contextUsed.
-        let tokens = max(0, before + context)
+        let turns = intValue(json["assistantMessageCount"])
+        // `contextTokensUsed` is the FINAL context-window occupancy (a snapshot), not tokens
+        // consumed; `before + context` therefore severely undercounts an agentic session that
+        // re-sends its growing context every turn. Estimate cumulative usage from turn count.
+        let tokens = estimatedCumulativeTokens(before: before, context: context, turns: turns)
+        // Each assistant message ≈ one API round-trip; the old code hard-coded 1 request/session.
+        let requests = max(1, turns)
         let model: String = {
             if let primary = TokenPricingCatalog.normalizeModelID(json["primaryModelId"] as? String) {
                 return primary
@@ -368,9 +386,22 @@ enum LocalGrokUsage {
         let cost = TokenPricingCatalog.estimateUSD(model: model, inputTokens: input, outputTokens: output)
 
         cacheLock.lock()
-        fileCache[path] = (mtime, size, tokens, cost, model, day)
+        fileCache[path] = (mtime, size, tokens, cost, model, day, requests)
         cacheLock.unlock()
-        return (tokens, cost, model, day)
+        return (tokens, cost, model, day, requests)
+    }
+
+    /// Estimate cumulative tokens for a Grok session from its final context occupancy and
+    /// turn count. Each agentic turn re-sends the whole (growing) context, so cumulative
+    /// input ≈ the area under a 0→`context` ramp over `turns` responses, plus any
+    /// pre-compaction spans already summed in `before`.
+    /// ponytail: triangular-growth heuristic (assumes ~linear context growth, no mid-session
+    /// shrink); the exact figure would require summing per-turn deltas from updates.jsonl.
+    /// `internal` so the self-check can pin it above the old snapshot floor.
+    static func estimatedCumulativeTokens(before: Int, context: Int, turns: Int) -> Int {
+        let t = max(1, turns)
+        let ramp = Int(Double(max(0, context)) * Double(t + 1) / 2.0)
+        return max(0, before + ramp)
     }
 
     private static func intValue(_ raw: Any?) -> Int {
@@ -404,10 +435,21 @@ enum LocalOpenCodeUsage {
         defer { sqlite3_close(db) }
 
         let cutoffStart = analyticsCutoffStart(now: now, historyDays: historyDays)
-        let cutoffMs = Int64(cutoffStart.timeIntervalSince1970 * 1000)
-        let cutoffSeconds = Int64(cutoffStart.timeIntervalSince1970)
-        let todayStartMs = Int64(Calendar.current.startOfDay(for: now).timeIntervalSince1970 * 1000)
-        let todayStartSeconds = Int64(Calendar.current.startOfDay(for: now).timeIntervalSince1970)
+        let todayStart = Calendar.current.startOfDay(for: now)
+
+        // OpenCode timestamps are epoch MILLISECONDS on current builds; older DBs used seconds.
+        // Detect the unit once from the max value rather than the old "retry in seconds when
+        // history is empty" heuristic — that heuristic misfired on an idle DB (ms values always
+        // clear a seconds-scaled cutoff) and dumped the entire history into "today".
+        var maxUpdated: Int64 = 0
+        var maxStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT MAX(time_updated) FROM session;", -1, &maxStmt, nil) == SQLITE_OK {
+            if sqlite3_step(maxStmt) == SQLITE_ROW { maxUpdated = sqlite3_column_int64(maxStmt, 0) }
+        }
+        sqlite3_finalize(maxStmt)
+        let scale: Int64 = timeUpdatedIsMilliseconds(maxUpdated) ? 1000 : 1
+        let cutoff = Int64(cutoffStart.timeIntervalSince1970) * scale
+        let todayStartTs = Int64(todayStart.timeIntervalSince1970) * scale
 
         let sql = """
         SELECT model, tokens_input, tokens_output, tokens_cache_read, tokens_reasoning,
@@ -421,7 +463,7 @@ enum LocalOpenCodeUsage {
             return nil
         }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int64(stmt, 1, cutoffMs)
+        sqlite3_bind_int64(stmt, 1, cutoff)
 
         struct Bucket {
             var input = 0
@@ -432,63 +474,51 @@ enum LocalOpenCodeUsage {
             var requests = 0
         }
         var models: [String: Bucket] = [:]
-        var sessionTokens = 0
-        var sessionCost = 0.0
         var historyTokens = 0
         var historyCost = 0.0
 
-        func consumeRows(_ stmt: OpaquePointer, todayStart: Int64) {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let modelRaw = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? "{}"
-                // OpenCode stores `{"id":"glm-5.2","providerID":"opencode-go"}` - price by id.
-                let model = TokenPricingCatalog.normalizeModelID(parseOpenCodeModel(modelRaw))
-                    ?? parseOpenCodeModel(modelRaw)
-                let input = Int(sqlite3_column_int64(stmt, 1))
-                let output = Int(sqlite3_column_int64(stmt, 2))
-                let cache = Int(sqlite3_column_int64(stmt, 3))
-                let reasoning = Int(sqlite3_column_int64(stmt, 4))
-                let storedCost = sqlite3_column_double(stmt, 5)
-                let updated = sqlite3_column_int64(stmt, 6)
+        // 30-day history + per-model breakdown come from the cumulative `session` row.
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let modelRaw = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? "{}"
+            // OpenCode stores `{"id":"glm-5.2","providerID":"opencode-go"}` - price by id.
+            let model = TokenPricingCatalog.normalizeModelID(parseOpenCodeModel(modelRaw))
+                ?? parseOpenCodeModel(modelRaw)
+            let input = Int(sqlite3_column_int64(stmt, 1))
+            let output = Int(sqlite3_column_int64(stmt, 2))
+            let cache = Int(sqlite3_column_int64(stmt, 3))
+            let reasoning = Int(sqlite3_column_int64(stmt, 4))
+            let storedCost = sqlite3_column_double(stmt, 5)
 
-                let total = input + output + cache + reasoning
-                guard total > 0 || storedCost > 0 else { continue }
+            let total = input + output + cache + reasoning
+            guard total > 0 || storedCost > 0 else { continue }
 
-                // Prefer OpenCode's own cost when > 0 (already model-aware); else list-price by model id.
-                let cost = storedCost > 0
-                    ? storedCost
-                    : TokenPricingCatalog.estimateUSD(
-                        model: model,
-                        inputTokens: input,
-                        outputTokens: output + reasoning,
-                        cacheReadTokens: cache
-                    )
+            // Prefer OpenCode's own cost when > 0 (already model-aware); else list-price by model id.
+            let cost = storedCost > 0
+                ? storedCost
+                : TokenPricingCatalog.estimateUSD(
+                    model: model,
+                    inputTokens: input,
+                    outputTokens: output + reasoning,
+                    cacheReadTokens: cache
+                )
 
-                var bucket = models[model] ?? Bucket()
-                bucket.input += input
-                bucket.output += output + reasoning
-                bucket.cache += cache
-                bucket.total += total
-                bucket.cost += cost
-                bucket.requests += 1
-                models[model] = bucket
+            var bucket = models[model] ?? Bucket()
+            bucket.input += input
+            bucket.output += output + reasoning
+            bucket.cache += cache
+            bucket.total += total
+            bucket.cost += cost
+            bucket.requests += 1
+            models[model] = bucket
 
-                historyTokens += total
-                historyCost += cost
-                if updated >= todayStart {
-                    sessionTokens += total
-                    sessionCost += cost
-                }
-            }
+            historyTokens += total
+            historyCost += cost
         }
 
-        consumeRows(stmt, todayStart: todayStartMs)
-
-        if historyTokens == 0, historyCost == 0 {
-            sqlite3_reset(stmt)
-            sqlite3_clear_bindings(stmt)
-            sqlite3_bind_int64(stmt, 1, cutoffSeconds)
-            consumeRows(stmt, todayStart: todayStartSeconds)
-        }
+        // "Today" must come from the per-turn `message` table, not the cumulative session row:
+        // a resumed/multi-day session touched today would otherwise dump its whole lifetime
+        // total into today's bucket. Falls back to (0,0) on older DBs with no `message` table.
+        let (sessionTokens, sessionCost) = openCodeTodayTotals(db: db, todayStartTs: todayStartTs)
 
         guard historyTokens > 0 || historyCost > 0 else { return nil }
 
@@ -528,13 +558,51 @@ enum LocalOpenCodeUsage {
         }
         return raw.isEmpty ? "opencode" : raw
     }
+
+    /// OpenCode changed epoch units across versions: values above ~1e11 are milliseconds
+    /// (seconds wouldn't reach that until ~year 5138), below are seconds. `internal` for tests.
+    static func timeUpdatedIsMilliseconds(_ maxValue: Int64) -> Bool {
+        maxValue > 100_000_000_000
+    }
+
+    /// Sum today's assistant-message tokens/cost from the per-turn `message` table (each row's
+    /// `data` is a JSON blob with `role`, `tokens{input,output,reasoning,cache{read}}`, `cost`).
+    /// Returns (0, 0) when the table/columns are absent (older OpenCode) so callers just show
+    /// no "today" rather than mis-attributing a cumulative session total.
+    private static func openCodeTodayTotals(db: OpaquePointer, todayStartTs: Int64) -> (tokens: Int, cost: Double) {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT data FROM message WHERE time_created >= ?;", -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            return (0, 0)
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, todayStartTs)
+
+        var tokens = 0
+        var cost = 0.0
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let c = sqlite3_column_text(stmt, 0),
+                  let data = String(cString: c).data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (json["role"] as? String) == "assistant"
+            else { continue }
+            let tk = json["tokens"] as? [String: Any] ?? [:]
+            let cache = tk["cache"] as? [String: Any] ?? [:]
+            let input = (tk["input"] as? NSNumber)?.intValue ?? 0
+            let output = (tk["output"] as? NSNumber)?.intValue ?? 0
+            let reasoning = (tk["reasoning"] as? NSNumber)?.intValue ?? 0
+            let cacheRead = (cache["read"] as? NSNumber)?.intValue ?? 0
+            tokens += input + output + reasoning + cacheRead
+            cost += (json["cost"] as? NSNumber)?.doubleValue ?? 0
+        }
+        return (tokens, cost)
+    }
 }
 
 // MARK: - GitHub Copilot (JB panel transcripts — token estimate from message text)
 
 enum LocalCopilotUsage {
     private static let cacheLock = NSLock()
-    private static var fileCache: [String: (mtime: Date, size: Int, tokens: Int, requests: Int, day: Int)] = [:]
+    private static var fileCache: [String: (mtime: Date, size: Int, requests: Int, days: [Int: Int])] = [:]
     /// Skip pathological multi‑MB transcripts (still count via cache once parsed).
     private static let maxFileBytes = 8_000_000
 
@@ -566,10 +634,11 @@ enum LocalCopilotUsage {
             let path = url.standardizedFileURL.resolvingSymlinksInPath().path
             live.insert(path)
             let parsed = parseFile(path: path, url: url, mtime: mtime, size: size)
-            guard parsed.tokens > 0 else { continue }
-            historyTokens += parsed.tokens
+            let fileTokens = parsed.days.values.reduce(0, +)
+            guard fileTokens > 0 else { continue }
+            historyTokens += fileTokens
             requests += parsed.requests
-            if parsed.day == today { sessionTokens += parsed.tokens }
+            sessionTokens += parsed.days[today] ?? 0
         }
 
         cacheLock.lock()
@@ -610,19 +679,19 @@ enum LocalCopilotUsage {
         )
     }
 
-    private static func parseFile(path: String, url: URL, mtime: Date, size: Int) -> (tokens: Int, requests: Int, day: Int) {
+    private static func parseFile(path: String, url: URL, mtime: Date, size: Int) -> (requests: Int, days: [Int: Int]) {
         cacheLock.lock()
         if let c = fileCache[path], c.mtime == mtime, c.size == size {
             cacheLock.unlock()
-            return (c.tokens, c.requests, c.day)
+            return (c.requests, c.days)
         }
         cacheLock.unlock()
 
-        let day = dayKey(for: mtime)
+        let mtimeDay = dayKey(for: mtime)
         guard let content = try? String(contentsOf: url, encoding: .utf8) else {
-            return (0, 0, day)
+            return (0, [:])
         }
-        var tokens = 0
+        var days: [Int: Int] = [:]
         var requests = 0
         for line in content.split(whereSeparator: \.isNewline) {
             guard let data = String(line).data(using: .utf8),
@@ -634,14 +703,33 @@ enum LocalCopilotUsage {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
             // ~4 chars/token rough estimate when Copilot doesn't log usage.
-            tokens += max(1, Int((Double(text.utf8.count) / 4.0).rounded(.up)))
+            let tokens = max(1, Int((Double(text.utf8.count) / 4.0).rounded(.up)))
+            // Bucket by the message's OWN timestamp; an append-only transcript reopened today
+            // must not retag its whole history as "today" (the old file-mtime bug).
+            let day = copilotDayKey(timestamp: json["timestamp"] as? String, fallbackDayKey: mtimeDay)
+            days[day, default: 0] += tokens
             requests += 1
         }
 
         cacheLock.lock()
-        fileCache[path] = (mtime, size, tokens, requests, day)
+        fileCache[path] = (mtime, size, requests, days)
         cacheLock.unlock()
-        return (tokens, requests, day)
+        return (requests, days)
+    }
+
+    private static let copilotISO: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    /// Day bucket for a Copilot message: its own ISO8601 `timestamp` when present, else the
+    /// file mtime day. `internal` for the self-check.
+    static func copilotDayKey(timestamp: String?, fallbackDayKey: Int) -> Int {
+        if let ts = timestamp, let date = copilotISO.date(from: ts) {
+            return dayKey(for: date)
+        }
+        return fallbackDayKey
     }
 
     private static func dayKey(for date: Date) -> Int {

@@ -4,6 +4,25 @@ All notable changes to **VibeProxy Ultra** are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-07-12
+
+Analytics accuracy and live model pricing.
+
+### Fixed
+- **Gemini analytics** — Parse top-level `tokens` (not OpenAI-style `usage`); bill thinking as output; subtract cached from input; **dedupe rewritten message ids** so tool-call rewrites no longer ~2× inflate volume.
+- **Codex analytics** — Skip `token_count` re-emits when cumulative usage is unchanged (rate-limit refreshes were over-counting).
+- **Grok analytics** — Estimate cumulative tokens from turn count × context growth (was a final-window snapshot undercount); request count from assistant messages.
+- **Kiro / Copilot “today”** — Bucket by per-turn / per-message timestamps (and Kiro `created_at` fallback), not file mtime, so resumed sessions don’t dump history into today.
+- **OpenCode “today”** — Detect ms vs seconds epoch units; sum today’s rows from the `message` table instead of attributing a whole multi-day session total.
+- **Pricing** — GPT-5.6 Sol/Terra/Luna, Grok 4.5 / Composer / Build, DeepSeek V4, Kimi K2.6, Gemini 3.x flash tiers; free/coding-plan $0 remote rows no longer clobber list prices.
+
+### Added
+- **Auto-updating list prices** from [models.dev](https://models.dev) (daily TTL + disk cache), with Settings toggle. When off, only the built-in catalog is used.
+- Faster cost re-scan when local session roots change (activity mtime probe).
+
+### Changed
+- Version **1.2.1**.
+
 ## [1.2.0] - 2026-07-10
 
 Full menu bar + Settings UI/UX revamp with Apple **Liquid Glass** styling on macOS 26 (Tahoe), backward compatible with earlier macOS.
@@ -81,6 +100,7 @@ Initial VibeProxy Ultra release — usage limits, account import, session reliab
 - Analytics accuracy (Codex deltas, model name validation, Gemini/Antigravity double-count)
 - False session expiry when refresh token remains valid
 
+[1.2.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.0
 [1.1.2]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.2
 [1.1.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.1

@@ -1209,6 +1209,14 @@ struct SettingsView: View {
 
             Section("Display") {
                 Toggle("Show cost estimates ($)", isOn: $settings.showCostEstimates)
+                Toggle("Auto-update model prices", isOn: $settings.autoUpdatePricing)
+                if settings.autoUpdatePricing {
+                    Text(RemotePricingCatalog.modelCount > 0
+                        ? "Live list-prices: \(RemotePricingCatalog.modelCount) models from models.dev"
+                        : "Using built-in prices — live feed loads shortly")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Toggle("Show Status tab", isOn: $settings.showStatusTab)
                 Toggle("Show Analytics tab", isOn: $settings.showAnalyticsTab)
             }

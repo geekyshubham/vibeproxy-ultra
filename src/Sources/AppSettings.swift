@@ -41,6 +41,12 @@ final class AppSettings: ObservableObject {
         didSet { persist(showAnalyticsTab, forKey: Keys.showAnalyticsTab) }
     }
 
+    /// Auto-update model list-prices from the remote pricing feed (models.dev) so cost
+    /// estimates track real prices. When off, the built-in static catalog is used.
+    @Published var autoUpdatePricing: Bool {
+        didSet { persist(autoUpdatePricing, forKey: Keys.autoUpdatePricing) }
+    }
+
     /// Show the menu-bar icon with a colored dot reflecting worst quota pressure.
     @Published var menuBarUsageBadge: Bool {
         didSet { persist(menuBarUsageBadge, forKey: Keys.menuBarUsageBadge) }
@@ -93,6 +99,7 @@ final class AppSettings: ObservableObject {
         showCostEstimates = defaults.bool(forKey: Keys.showCostEstimates, default: true)
         showStatusTab = defaults.bool(forKey: Keys.showStatusTab, default: true)
         showAnalyticsTab = defaults.bool(forKey: Keys.showAnalyticsTab, default: true)
+        autoUpdatePricing = defaults.bool(forKey: Keys.autoUpdatePricing, default: true)
         menuBarUsageBadge = defaults.bool(forKey: Keys.menuBarUsageBadge, default: false)
         restartAppOnSwitch = defaults.bool(forKey: Keys.restartAppOnSwitch, default: true)
         confirmBeforeSwitch = defaults.bool(forKey: Keys.confirmBeforeSwitch, default: true)
@@ -120,6 +127,7 @@ final class AppSettings: ObservableObject {
         static let showCostEstimates = "ultra.showCostEstimates"
         static let showStatusTab = "ultra.showStatusTab"
         static let showAnalyticsTab = "ultra.showAnalyticsTab"
+        static let autoUpdatePricing = "ultra.autoUpdatePricing"
         static let menuBarUsageBadge = "ultra.menuBarUsageBadge"
         static let restartAppOnSwitch = "ultra.restartAppOnSwitch"
         static let confirmBeforeSwitch = "ultra.confirmBeforeSwitch"

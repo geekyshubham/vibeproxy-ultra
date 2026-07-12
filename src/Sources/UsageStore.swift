@@ -27,6 +27,29 @@ final class UsageStore: ObservableObject {
     private var lastCostScanAt: Date?
     private let costScanMinInterval: TimeInterval = 15 * 60
 
+    /// Cheap freshness probe: newest mtime among the local-usage session roots. When one
+    /// advances, a CLI tool just wrote a session (e.g. a Kiro turn flushed), so we re-scan
+    /// instead of waiting out the throttle. The per-file scan cache keeps this inexpensive.
+    /// ponytail: dir-mtime heuristic — catches added/rewritten session files (atomic writes
+    /// bump the parent dir); may miss pure in-place appends until the throttle window elapses.
+    private func newestLocalUsageActivity() -> Date? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let roots = [
+            ".kiro/sessions/cli", ".grok/sessions", ".copilot/jb",
+            ".claude/projects", ".codex/sessions", ".gemini/tmp",
+            ".local/share/opencode", ".opencode",
+        ]
+        var newest: Date?
+        for rel in roots {
+            let path = home.appendingPathComponent(rel).path
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                  let mtime = attrs[.modificationDate] as? Date
+            else { continue }
+            if newest == nil || mtime > newest! { newest = mtime }
+        }
+        return newest
+    }
+
     func startAutoRefresh(immediate: Bool = true) {
         let interval = AppSettings.shared.usageRefreshInterval
         let statusInterval = AppSettings.shared.statusRefreshInterval
@@ -206,14 +229,18 @@ final class UsageStore: ObservableObject {
             // Expensive local JSONL scans (Codex/Claude trees) — throttle hard.
             // This was the main CPU hog when run on every 90s refresh for every provider.
             let shouldScanCosts: Bool = await MainActor.run {
-                if let last = self.lastCostScanAt,
-                   Date().timeIntervalSince(last) < self.costScanMinInterval
-                {
-                    return false
-                }
-                return true
+                guard let last = self.lastCostScanAt else { return true }
+                // Force a scan once the throttle window elapses…
+                if Date().timeIntervalSince(last) >= self.costScanMinInterval { return true }
+                // …or as soon as a provider wrote new session data since the last scan, so a
+                // freshly-flushed turn (e.g. Kiro credits) surfaces on the next refresh instead
+                // of up to 15 minutes later.
+                if let activity = self.newestLocalUsageActivity(), activity > last { return true }
+                return false
             }
             if shouldScanCosts {
+                // Keep list-prices current (daily TTL; no-op when fresh or disabled) before pricing the scan.
+                await RemotePricingCatalog.refreshIfStale()
                 let historyDays = await MainActor.run { AppSettings.shared.analyticsHistoryDays }
                 let allCosts = await Task.detached(priority: .utility) {
                     LocalTokenCostScanner.allProviderSnapshots(historyDays: historyDays)

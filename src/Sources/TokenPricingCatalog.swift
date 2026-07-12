@@ -82,13 +82,42 @@ enum TokenPricingCatalog {
         return name.isEmpty ? nil : name
     }
 
+    /// Canonical lower-cased, dash-versioned key for pricing lookup and remote-feed matching
+    /// (e.g. "GPT-5.4", "openai/gpt-5.4" → "gpt-5-4"). Mirrors the key `rate()` matches on so the
+    /// remote catalog and the static rules key models identically.
+    static func dashedKey(_ raw: String?) -> String? {
+        guard let normalized = normalizeModelID(raw) else { return nil }
+        return normalized.lowercased().replacingOccurrences(of: ".", with: "-")
+    }
+
     static func rate(forModel rawModel: String?) -> Rate {
         guard let normalized = normalizeModelID(rawModel) else { return fallback }
         // Matching key: lowercase + dots→dashes for version fragments
         let model = normalized.lowercased()
         let dashed = model.replacingOccurrences(of: ".", with: "-")
 
+        // Live remote list-price (models.dev) wins when the feed knows this model and the user
+        // has auto-update enabled. When the toggle is off, ignore any in-memory/disk cache so
+        // estimates match the built-in table only (as the Settings copy promises).
+        if AppSettings.shared.autoUpdatePricing,
+           let dynamic = RemotePricingCatalog.rate(forDashedID: dashed)
+        {
+            return dynamic
+        }
+
         // --- OpenAI / Codex (most-specific first, like CodexBar tables) ---
+        // GPT-5.6 family (Sol/Terra/Luna), launched 2026-07-09 as three priced tiers. A bare
+        // "gpt-5.6" or the "-sol" flagship suffix must NOT fall through to base gpt-5 ($1.25/$10).
+        if dashed.contains("gpt-5-6-terra") || model.contains("gpt-5.6-terra") {
+            return Rate(inputPerMTok: 2.5, outputPerMTok: 15.0, cacheReadPerMTok: 0.25)
+        }
+        if dashed.contains("gpt-5-6-luna") || model.contains("gpt-5.6-luna") {
+            return Rate(inputPerMTok: 1.0, outputPerMTok: 6.0, cacheReadPerMTok: 0.1)
+        }
+        if dashed.contains("gpt-5-6") || model.contains("gpt-5.6") {
+            // Sol (flagship) and the family default: $5 / $30, cached $0.50.
+            return Rate(inputPerMTok: 5.0, outputPerMTok: 30.0, cacheReadPerMTok: 0.5)
+        }
         if dashed.contains("gpt-5-5-pro") || model.contains("gpt-5.5-pro") {
             return Rate(inputPerMTok: 30.0, outputPerMTok: 180.0, cacheReadPerMTok: 0)
         }
@@ -232,6 +261,19 @@ enum TokenPricingCatalog {
 
         // --- Google ---
         if dashed.contains("gemini") {
+            // Most-specific first — bare "flash" used to swallow 3.5/3.x at the old 2.0 rates.
+            if dashed.contains("3-5-flash") || model.contains("3.5-flash") {
+                return Rate(inputPerMTok: 1.5, outputPerMTok: 9.0, cacheReadPerMTok: 0.15)
+            }
+            if dashed.contains("3-1-flash-lite") || model.contains("3.1-flash-lite") {
+                return Rate(inputPerMTok: 0.25, outputPerMTok: 1.5, cacheReadPerMTok: 0.025)
+            }
+            if dashed.contains("3-flash") || model.contains("gemini-3-flash") {
+                return Rate(inputPerMTok: 0.5, outputPerMTok: 3.0, cacheReadPerMTok: 0.05)
+            }
+            if dashed.contains("2-5-flash") || model.contains("2.5-flash") {
+                return Rate(inputPerMTok: 0.3, outputPerMTok: 2.5, cacheReadPerMTok: 0.03)
+            }
             if dashed.contains("flash") {
                 return Rate(inputPerMTok: 0.1, outputPerMTok: 0.4, cacheReadPerMTok: 0.025)
             }
@@ -243,21 +285,39 @@ enum TokenPricingCatalog {
 
         // --- xAI ---
         if dashed.contains("grok") {
-            if dashed.contains("composer") || dashed.contains("fast") || dashed.contains("mini") {
+            // Cursor-style Composer coding model (Composer 2.5 ≈ $0.50 / $2.50 standard).
+            // Checked before "fast" so "grok-composer-2.5-fast" prices as Composer, not a fast tier.
+            if dashed.contains("composer") {
+                return Rate(inputPerMTok: 0.5, outputPerMTok: 2.5, cacheReadPerMTok: 0.05)
+            }
+            // Fast / mini tiers (e.g. Grok 4.1 Fast $0.20 / $0.50).
+            if dashed.contains("fast") || dashed.contains("mini") {
                 return Rate(inputPerMTok: 0.2, outputPerMTok: 0.5, cacheReadPerMTok: 0.05)
             }
-            return Rate(inputPerMTok: 3.0, outputPerMTok: 15.0, cacheReadPerMTok: 0.75)
+            if dashed.contains("grok-4-3") {
+                return Rate(inputPerMTok: 1.25, outputPerMTok: 2.5, cacheReadPerMTok: 0.2)
+            }
+            if dashed.contains("grok-build") {
+                return Rate(inputPerMTok: 1.0, outputPerMTok: 2.0, cacheReadPerMTok: 0.2)
+            }
+            // Grok 4.5 (current flagship) + default: $2 / $6, cached $0.50 (xAI cache read ≈ 25% of input).
+            return Rate(inputPerMTok: 2.0, outputPerMTok: 6.0, cacheReadPerMTok: 0.5)
         }
 
         // --- Open-weight / China ---
         if dashed.contains("deepseek") {
-            return Rate(inputPerMTok: 0.27, outputPerMTok: 1.1, cacheReadPerMTok: 0.07)
+            if dashed.contains("flash") {
+                return Rate(inputPerMTok: 0.14, outputPerMTok: 0.28, cacheReadPerMTok: 0.014)
+            }
+            // V4-Pro permanent list price ($0.435 / $0.87; cache hit ≈ $0.0036, rounded up).
+            return Rate(inputPerMTok: 0.435, outputPerMTok: 0.87, cacheReadPerMTok: 0.04)
         }
         if dashed.contains("qwen") {
             return Rate(inputPerMTok: 0.4, outputPerMTok: 1.2, cacheReadPerMTok: 0.1)
         }
         if dashed.contains("kimi") || dashed.contains("moonshot") {
-            return Rate(inputPerMTok: 0.6, outputPerMTok: 2.5, cacheReadPerMTok: 0.15)
+            // Kimi K2.6 official Moonshot pricing ($0.95 / $4.00, cached $0.16).
+            return Rate(inputPerMTok: 0.95, outputPerMTok: 4.0, cacheReadPerMTok: 0.16)
         }
         if dashed.contains("glm") {
             return Rate(inputPerMTok: 0.5, outputPerMTok: 2.0, cacheReadPerMTok: 0.1)

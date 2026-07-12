@@ -63,6 +63,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         }
         authManager.checkAuthStatus()
         usageStore.clearCachedUsage()
+        // Load cached model prices immediately and refresh the live feed (models.dev) in the
+        // background, so cost estimates track real pricing rather than a frozen table.
+        RemotePricingCatalog.bootstrap()
         usageStore.startAutoRefresh()
         // Keep OAuth access tokens fresh (refresh ~15 minutes before expiry).
         TokenRefreshService.startAutoRefresh()

@@ -391,6 +391,14 @@ enum LocalTokenCostScanner {
 
         // Track the active model across a Codex session (usage lines carry no model).
         var currentModel = defaultModel(for: providerID)
+        // Codex re-emits `token_count` events on rate-limit refreshes with an identical
+        // `last_token_usage` while `total_token_usage` is unchanged; summing that delta again
+        // over-counts (~4% on active sessions). Skip events whose cumulative hasn't advanced.
+        var codexPrevCumulative = -1
+        // Gemini CLI rewrites the same assistant message: first a plain `type:gemini` line,
+        // then the same `id` again with `toolCalls` attached and identical `tokens`. Summing
+        // both ~2× inflates analytics. Dedup by message id within the file.
+        var seenGeminiMessageIDs = Set<String>()
 
         for line in content.split(whereSeparator: \.isNewline) {
             let raw = String(line)
@@ -400,6 +408,24 @@ enum LocalTokenCostScanner {
 
             if let model = trackModel(from: json, providerID: providerID) {
                 currentModel = model
+            }
+
+            if providerID == "codex",
+               (json["type"] as? String) == "event_msg",
+               let payload = json["payload"] as? [String: Any],
+               (payload["type"] as? String) == "token_count",
+               let info = payload["info"] as? [String: Any],
+               let total = info["total_token_usage"] as? [String: Any]
+            {
+                let cumulative = intValue(total, keys: ["total_tokens"])
+                if cumulative == codexPrevCumulative { continue }
+                codexPrevCumulative = cumulative
+            }
+
+            if providerID == "gemini",
+               let messageID = json["id"] as? String, !messageID.isEmpty
+            {
+                if !seenGeminiMessageIDs.insert(messageID).inserted { continue }
             }
 
             guard let usage = extractUsage(
@@ -490,6 +516,8 @@ enum LocalTokenCostScanner {
             return extractCodexUsage(from: json, fallbackModel: fallbackModel)
         case "claude":
             return extractClaudeUsage(from: json)
+        case "gemini":
+            return extractGeminiUsage(from: json)
         default:
             return extractGenericUsage(from: json, fallbackModel: fallbackModel)
         }
@@ -575,6 +603,51 @@ enum LocalTokenCostScanner {
             cost: cost,
             timestamp: parseTimestamp(json["timestamp"])
         )
+    }
+
+    /// Gemini CLI writes per-response lines as `{"type":"gemini","model":…,"timestamp":…,
+    /// "tokens":{"input","output","cached","thoughts","total"}}` — a TOP-LEVEL `tokens`
+    /// object, NOT the OpenAI-style `usage` dict the generic extractor looks for. Without a
+    /// dedicated path, every Gemini line was dropped and Gemini analytics were always empty.
+    private static func extractGeminiUsage(from json: [String: Any]) -> LineUsage? {
+        guard (json["type"] as? String) == "gemini",
+              let tokens = json["tokens"] as? [String: Any]
+        else { return nil }
+        let model = normalizeModel(stringValue(json, keys: ["model"])) ?? "gemini"
+        guard isPlausibleModel(model) else { return nil }
+
+        let b = geminiTokenBreakdown(tokens)
+        if b.total == 0 { return nil }
+        let cost = TokenPricingCatalog.estimateUSD(
+            model: model,
+            inputTokens: b.nonCachedInput,
+            outputTokens: b.billedOutput,
+            cacheReadTokens: b.cacheRead
+        )
+        return LineUsage(
+            model: model,
+            input: b.nonCachedInput,
+            output: b.billedOutput,
+            cacheRead: b.cacheRead,
+            total: b.total,
+            cost: cost,
+            timestamp: parseTimestamp(json["timestamp"])
+        )
+    }
+
+    /// Pure token math for a Gemini `tokens` object. `input` (promptTokenCount) already
+    /// includes `cached`, so non-cached input is `input - cached`; thinking tokens (`thoughts`)
+    /// are billed as output. `internal` so the self-check can pin the schema mapping.
+    static func geminiTokenBreakdown(_ tokens: [String: Any]) -> (nonCachedInput: Int, billedOutput: Int, cacheRead: Int, total: Int) {
+        let rawInput = intValue(tokens, keys: ["input"])
+        let cached = intValue(tokens, keys: ["cached"])
+        let output = intValue(tokens, keys: ["output"])
+        let thoughts = intValue(tokens, keys: ["thoughts"])
+        let nonCachedInput = max(0, rawInput - cached)
+        let billedOutput = output + thoughts
+        let declared = intValue(tokens, keys: ["total"])
+        let total = declared > 0 ? declared : nonCachedInput + billedOutput + cached
+        return (nonCachedInput, billedOutput, cached, total)
     }
 
     /// Best-effort for other providers. Only counts lines with both a usage dict and a
