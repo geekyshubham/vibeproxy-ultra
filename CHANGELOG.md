@@ -4,6 +4,16 @@ All notable changes to **VibeProxy Ultra** are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-07-14
+
+### Fixed
+- **Codex multi-subscription switch** — One OAuth login can own Go + Team/Enterprise. Switching the whole account always pinned JWT **Go**. Each subscription row now has its own **Switch to …** control that writes that workspace id into `~/.codex/auth.json` `tokens.account_id`.
+- **Cockpit-style app restart** — On switch (when enabled), kill & relaunch Codex/ChatGPT/Claude (and related CLI processes via `pgrep`) so the desktop app actually reloads the chosen account.
+- **Grok usage limits** — Prefer live `~/.grok` tokens, skip dead cli-proxy tokens, auto-refresh once on auth failure, and replace cryptic URLSession “unexpected” errors with actionable messages.
+
+### Changed
+- Version **1.2.3**.
+
 ## [1.2.2] - 2026-07-12
 
 ### Fixed
@@ -112,6 +122,7 @@ Initial VibeProxy Ultra release — usage limits, account import, session reliab
 - Analytics accuracy (Codex deltas, model name validation, Gemini/Antigravity double-count)
 - False session expiry when refresh token remains valid
 
+[1.2.3]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.3
 [1.2.2]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.2
 [1.2.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.0

@@ -1504,35 +1504,56 @@ enum NativeUsageFetcher {
         let localEmail = stringValue(localGrok ?? [:], keys: ["email"])
 
         // Token order (per account — never stamp SuperGrok onto every row blindly):
-        // 1) this auth file's token
-        // 2) ~/.grok/auth.json only when emails match (or this file has no email)
-        var tokenCandidates: [(token: String, sourceEmail: String?)] = []
-        if let t = stringValue(payload, keys: ["access_token", "key"]), !t.isEmpty {
-            tokenCandidates.append((t, accountEmail))
+        // 1) fresh ~/.grok token when email matches (SuperGrok billing actually works here)
+        // 2) this auth file's token if not expired
+        // 3) expired tokens last (may still work briefly; then we try refresh)
+        var tokenCandidates: [(token: String, source: String, expired: Bool)] = []
+        func appendCandidate(_ token: String, source: String, expired: Bool) {
+            guard !token.isEmpty, !tokenCandidates.contains(where: { $0.token == token }) else { return }
+            if expired {
+                tokenCandidates.append((token, source, true))
+            } else {
+                // Fresh tokens first.
+                if let idx = tokenCandidates.firstIndex(where: { $0.expired }) {
+                    tokenCandidates.insert((token, source, false), at: idx)
+                } else {
+                    tokenCandidates.append((token, source, false))
+                }
+            }
         }
+
         if let localGrok,
-           let t = stringValue(localGrok, keys: ["access_token", "key"]),
-           !t.isEmpty,
-           !tokenCandidates.contains(where: { $0.token == t })
+           let t = stringValue(localGrok, keys: ["access_token", "key"])
         {
             let emailsMatch: Bool = {
                 guard let accountEmail, let localEmail else {
-                    // No email on the auth file — allow CLI fallback for single-account setups.
                     return accountEmail == nil
                 }
                 return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
             }()
             if emailsMatch {
-                // Prefer non-expired CLI token first when it matches this identity.
-                if !isGrokCredentialExpired(localGrok) {
-                    tokenCandidates.insert((t, localEmail), at: 0)
-                } else {
-                    tokenCandidates.append((t, localEmail))
-                }
+                appendCandidate(t, source: "grok-cli", expired: isGrokCredentialExpired(localGrok))
             }
+        }
+        if let t = stringValue(payload, keys: ["access_token", "key"]) {
+            appendCandidate(t, source: "auth-file", expired: isGrokCredentialExpired(payload))
         }
 
         let displayEmail = accountEmail ?? localEmail
+
+        // Proactively refresh stale auth-file tokens once (cli-proxy xAI files go stale fast).
+        var workingPayload = payload
+        if isGrokCredentialExpired(payload) || tokenCandidates.allSatisfy(\.expired) {
+            if let fileURL = resolveAuthFileURL(authAccountID: authAccountID, providerID: providerID),
+               await TokenRefreshService.refreshAccountFile(fileURL),
+               let refreshed = readAuthPayload(at: fileURL)
+            {
+                workingPayload = enrichPayload(refreshed, for: .grok)
+                if let t = stringValue(workingPayload, keys: ["access_token", "key"]) {
+                    appendCandidate(t, source: "refreshed", expired: isGrokCredentialExpired(workingPayload))
+                }
+            }
+        }
 
         guard !tokenCandidates.isEmpty else {
             return .empty(
@@ -1545,16 +1566,22 @@ enum NativeUsageFetcher {
 
         var lastError: String?
         for candidate in tokenCandidates {
+            // Skip known-dead tokens unless nothing else remains (last resort).
+            if candidate.expired,
+               tokenCandidates.contains(where: { !$0.expired }),
+               candidate.source != "refreshed"
+            {
+                continue
+            }
             let outcome = await requestGrokBilling(
                 accessToken: candidate.token,
                 authAccountID: authAccountID,
                 providerID: providerID,
                 email: displayEmail,
-                payload: payload
+                payload: workingPayload
             )
             switch outcome {
             case .success(let snapshot):
-                // Force account email so UI rows stay distinct across multi-account Grok.
                 return ProviderUsageSnapshot(
                     id: snapshot.id,
                     providerID: snapshot.providerID,
@@ -1571,6 +1598,44 @@ enum NativeUsageFetcher {
                 )
             case .failure(let message):
                 lastError = message
+                // On auth failure of auth-file token, try one more refresh then retry once.
+                if message.localizedCaseInsensitiveContains("rejected")
+                    || message.localizedCaseInsensitiveContains("unauthenticated")
+                    || message.localizedCaseInsensitiveContains("bad-credentials"),
+                   candidate.source == "auth-file",
+                   let fileURL = resolveAuthFileURL(authAccountID: authAccountID, providerID: providerID),
+                   await TokenRefreshService.refreshAccountFile(fileURL),
+                   let refreshed = readAuthPayload(at: fileURL),
+                   let newToken = stringValue(refreshed, keys: ["access_token", "key"]),
+                   newToken != candidate.token
+                {
+                    let retry = await requestGrokBilling(
+                        accessToken: newToken,
+                        authAccountID: authAccountID,
+                        providerID: providerID,
+                        email: displayEmail,
+                        payload: refreshed
+                    )
+                    if case .success(let snapshot) = retry {
+                        return ProviderUsageSnapshot(
+                            id: snapshot.id,
+                            providerID: snapshot.providerID,
+                            source: snapshot.source,
+                            windows: snapshot.windows,
+                            subAccounts: snapshot.subAccounts,
+                            accountEmail: displayEmail,
+                            planType: snapshot.planType,
+                            planLabel: snapshot.planLabel,
+                            rateLimitResets: snapshot.rateLimitResets,
+                            updatedAt: snapshot.updatedAt,
+                            errorMessage: snapshot.errorMessage,
+                            isRefreshing: false
+                        )
+                    }
+                    if case .failure(let retryMsg) = retry {
+                        lastError = retryMsg
+                    }
+                }
                 continue
             }
         }
@@ -1579,8 +1644,61 @@ enum NativeUsageFetcher {
             authAccountID: authAccountID,
             providerID: providerID,
             accountEmail: displayEmail,
-            error: lastError ?? "Could not load Grok billing usage"
+            error: friendlyGrokError(lastError)
         )
+    }
+
+    /// Map low-level URLSession / grpc noise into a user-actionable line.
+    private static func friendlyGrokError(_ raw: String?) -> String {
+        let message = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = message.lowercased()
+        if message.isEmpty {
+            return "Could not load Grok usage — run `grok login` and retry"
+        }
+        if lower.contains("rejected")
+            || lower.contains("unauthenticated")
+            || lower.contains("bad-credentials")
+            || lower.contains("could not be validated")
+        {
+            return "Grok token invalid for billing — run `grok login` (cli-proxy xAI tokens often cannot read SuperGrok usage)"
+        }
+        if lower.contains("not connected")
+            || lower.contains("offline")
+            || lower.contains("network")
+            || lower.contains("timed out")
+            || lower.contains("timeout")
+            || lower.contains("internet connection")
+        {
+            return "Network error loading Grok usage — check connectivity and retry"
+        }
+        // URLSession's "The data couldn’t be read because it isn’t in the correct format." etc.
+        if lower.contains("couldn") || lower.contains("unexpected") || lower.contains("format") {
+            return "Grok billing returned an unexpected response — retry shortly or run `grok login`"
+        }
+        return message
+    }
+
+    private static func resolveAuthFileURL(authAccountID: String, providerID: String) -> URL? {
+        // authAccountID is AuthAccount.id (filename, with or without .json).
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cli-proxy-api")
+        let candidates = [
+            dir.appendingPathComponent(authAccountID),
+            dir.appendingPathComponent(authAccountID.hasSuffix(".json") ? authAccountID : "\(authAccountID).json"),
+        ]
+        for direct in candidates where FileManager.default.fileExists(atPath: direct.path) {
+            return direct
+        }
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        let needle = authAccountID.replacingOccurrences(of: ".json", with: "")
+        for file in files where file.pathExtension == "json" {
+            if file.deletingPathExtension().lastPathComponent == needle {
+                return file
+            }
+        }
+        return nil
     }
 
     private enum GrokBillingOutcome {
@@ -1667,8 +1785,19 @@ enum NativeUsageFetcher {
                     isRefreshing: false
                 )
             )
+        } catch let urlError as URLError {
+            switch urlError.code {
+            case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed:
+                return .failure("Network error loading Grok usage — check connectivity")
+            case .timedOut:
+                return .failure("Grok billing timed out — retry shortly")
+            case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
+                return .failure("Could not reach grok.com — check network/DNS")
+            default:
+                return .failure(friendlyGrokError(urlError.localizedDescription))
+            }
         } catch {
-            return .failure(error.localizedDescription)
+            return .failure(friendlyGrokError(error.localizedDescription))
         }
     }
 
@@ -2135,6 +2264,12 @@ extension NativeUsageFetcher {
             || lower.contains("could not be validated")
         {
             return "Grok billing rejected this token — run `grok login` (cli-proxy xAI tokens often cannot read SuperGrok usage)"
+        }
+        if status == 13 || status == 14 || status == 8 {
+            return "Grok billing temporarily unavailable (grpc \(status)) — retry shortly"
+        }
+        if message.isEmpty || lower == "billing request failed" {
+            return "Grok billing error (grpc \(status)) — retry or run `grok login`"
         }
         return message
     }

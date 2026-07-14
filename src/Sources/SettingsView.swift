@@ -1254,6 +1254,9 @@ struct SettingsView: View {
                     }
                 }
                 Toggle("Restart the desktop app after switching", isOn: $settings.restartAppOnSwitch)
+                Text("Like Cockpit: quit Codex/Claude (and matching CLI processes), then relaunch so the new account or ChatGPT subscription is loaded.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 Toggle("Ask before switching accounts", isOn: $settings.confirmBeforeSwitch)
                 Text("Switch buttons appear per account in the menu bar panel (hidden for the account already active on this Mac).")
                     .font(.caption)

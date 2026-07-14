@@ -644,8 +644,15 @@ private struct AccountUsageBlock: View {
 
     // MARK: - Native session switching
 
+    private var multiSubscription: Bool {
+        (usage?.subAccounts.count ?? 0) >= 2 && serviceType == .codex
+    }
+
     private var isCurrentNative: Bool {
-        nativeSession?.isCurrent(account) ?? false
+        // For multi-sub Codex, the login may be "current" while a *different* workspace
+        // is pinned — don't show a single Active chip that hides subscription switches.
+        if multiSubscription { return false }
+        return nativeSession?.isCurrent(account) ?? false
     }
 
     private var canSwitch: Bool {
@@ -653,9 +660,29 @@ private struct AccountUsageBlock: View {
         return !account.isExpired && !account.isDisabled && !isCurrentNative
     }
 
+    private func isActiveSubscription(_ sub: ProviderUsageSubAccount) -> Bool {
+        nativeSession?.isCurrentSubscription(account, chatGPTAccountID: sub.id) ?? false
+    }
+
+    private func canSwitchSubscription(_ sub: ProviderUsageSubAccount) -> Bool {
+        guard let ns = nativeSession, ns.supportsSwitching(serviceType) else { return false }
+        guard !account.isExpired, !account.isDisabled else { return false }
+        return !isActiveSubscription(sub)
+    }
+
     @ViewBuilder
     private var currentChip: some View {
-        if isCurrentNative {
+        if multiSubscription, let active = usage?.subAccounts.first(where: { isActiveSubscription($0) }) {
+            HStack(spacing: 3) {
+                Image(systemName: "checkmark.seal.fill").font(.system(size: 8))
+                Text(active.title).font(.system(size: 9, weight: .bold)).lineLimit(1)
+            }
+            .foregroundStyle(MenuBarDesign.success)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(MenuBarDesign.success.opacity(0.16), in: Capsule())
+            .help("Native \(serviceType.displayName) is on this subscription.")
+        } else if isCurrentNative {
             HStack(spacing: 3) {
                 Image(systemName: "checkmark.seal.fill").font(.system(size: 8))
                 Text("Active").font(.system(size: 9, weight: .bold))
@@ -670,7 +697,16 @@ private struct AccountUsageBlock: View {
 
     @ViewBuilder
     private var switchControls: some View {
-        if isCurrentNative {
+        // Multi-subscription: per-sub rows have their own Switch buttons.
+        if multiSubscription {
+            if let switchMessage {
+                Text(switchMessage)
+                    .font(.caption2)
+                    .foregroundStyle(switchSucceeded == true ? MenuBarDesign.success : .orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+        } else if isCurrentNative {
             Label("Current Mac session", systemImage: "checkmark.seal.fill")
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(MenuBarDesign.success)
@@ -686,7 +722,7 @@ private struct AccountUsageBlock: View {
                             .font(.caption2)
                         Button("Switch") {
                             pendingSwitchConfirm = false
-                            Task { @MainActor in await performSwitch() }
+                            Task { @MainActor in await performSwitch(chatGPTAccountID: nil, label: nil) }
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.mini)
@@ -697,7 +733,7 @@ private struct AccountUsageBlock: View {
                         if AppSettings.shared.confirmBeforeSwitch {
                             pendingSwitchConfirm = true
                         } else {
-                            Task { @MainActor in await performSwitch() }
+                            Task { @MainActor in await performSwitch(chatGPTAccountID: nil, label: nil) }
                         }
                     } label: {
                         HStack(spacing: 6) {
@@ -716,7 +752,7 @@ private struct AccountUsageBlock: View {
                     .controlSize(.small)
                     .tint(tint)
                     .disabled(isSwitching)
-                    .help("Make this the active \(serviceType.displayName) session on this Mac (writes native auth, then restarts the app if it's running).")
+                    .help("Make this the active \(serviceType.displayName) session on this Mac (writes native auth, kills & relaunches the desktop app like Cockpit).")
                 }
 
                 if let switchMessage {
@@ -730,13 +766,51 @@ private struct AccountUsageBlock: View {
         }
     }
 
+    @ViewBuilder
+    private func subscriptionSwitchControls(for sub: ProviderUsageSubAccount) -> some View {
+        if isActiveSubscription(sub) {
+            Label("Active subscription", systemImage: "checkmark.seal.fill")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(MenuBarDesign.success)
+        } else if canSwitchSubscription(sub) {
+            Button {
+                Task { @MainActor in
+                    await performSwitch(chatGPTAccountID: sub.id, label: sub.title)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    if isSwitching {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "arrow.left.arrow.right.circle.fill")
+                    }
+                    Text(isSwitching ? "Switching…" : "Switch to \(sub.title)")
+                        .font(.caption2.weight(.semibold))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(tint)
+            .disabled(isSwitching)
+            .help("Pin this ChatGPT subscription (writes tokens.account_id=\(sub.id)) and restart Codex so it uses \(sub.title), not Go.")
+        }
+    }
+
     @MainActor
-    private func performSwitch() async {
+    private func performSwitch(chatGPTAccountID: String?, label: String?) async {
         guard let ns = nativeSession else { return }
         isSwitching = true
         switchMessage = nil
         switchSucceeded = nil
-        let result = await ns.switchTo(account, restartApp: AppSettings.shared.restartAppOnSwitch)
+        let result = await ns.switchTo(
+            account,
+            chatGPTAccountID: chatGPTAccountID,
+            subscriptionLabel: label,
+            restartApp: AppSettings.shared.restartAppOnSwitch
+        )
         isSwitching = false
         switch result {
         case .switched(let message):
@@ -805,6 +879,13 @@ private struct AccountUsageBlock: View {
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                 }
+                                Spacer(minLength: 0)
+                                if isActiveSubscription(sub) {
+                                    Image(systemName: "checkmark.seal.fill")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(MenuBarDesign.success)
+                                        .help("Native Codex is pinned to this subscription")
+                                }
                             }
                             if !sub.windows.isEmpty {
                                 ForEach(Array(sub.windows.enumerated()), id: \.offset) { index, window in
@@ -824,6 +905,10 @@ private struct AccountUsageBlock: View {
                                 Text("No quota windows reported")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
+                            }
+                            // One Switch per subscription so Go vs Team/Enterprise is explicit.
+                            if multiSubscription {
+                                subscriptionSwitchControls(for: sub)
                             }
                         }
                         if sub.id != usage.subAccounts.last?.id {

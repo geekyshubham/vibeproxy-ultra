@@ -22,6 +22,10 @@ enum NativeSwitchOutcome: Equatable {
 /// VibeProxy stores accounts as CLIProxy auth files under `~/.cli-proxy-api/`; this
 /// manager translates a selected account's tokens into the *native* auth location
 /// (`~/.codex/auth.json`, `~/.claude/.credentials.json`, `~/.gemini/oauth_creds.json`).
+///
+/// For ChatGPT/Codex, one OAuth login can own **multiple** workspaces (Go + Team/Enterprise).
+/// `switchTo(..., chatGPTAccountID:)` writes that membership's id into `tokens.account_id`
+/// so Codex/ChatGPT actually run under the chosen subscription — not always JWT "go".
 final class NativeSessionManager: ObservableObject {
     static let shared = NativeSessionManager()
 
@@ -46,6 +50,20 @@ final class NativeSessionManager: ObservableObject {
 
     func isCurrent(_ account: AuthAccount) -> Bool {
         currentAccountIDs.contains(account.id)
+    }
+
+    /// True when the native Codex session is already on this ChatGPT workspace/subscription.
+    func isCurrentSubscription(_ account: AuthAccount, chatGPTAccountID: String?) -> Bool {
+        guard account.type == .codex else { return isCurrent(account) }
+        guard let identity = currentByProvider[.codex] else { return false }
+        guard matches(account, identity) else { return false }
+        guard let wanted = chatGPTAccountID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !wanted.isEmpty
+        else {
+            // No explicit membership: "current login" if email/account matches.
+            return true
+        }
+        return identity.accountID?.caseInsensitiveCompare(wanted) == .orderedSame
     }
 
     func currentIdentity(for type: ServiceType) -> NativeSessionIdentity? {
@@ -159,8 +177,17 @@ final class NativeSessionManager: ObservableObject {
 
     // MARK: - Switching
 
+    /// Switch the native session to `account`.
+    /// - Parameter chatGPTAccountID: For Codex multi-subscription logins, the membership /
+    ///   workspace id to pin in `tokens.account_id` (Team/Enterprise vs Go).
+    /// - Parameter subscriptionLabel: Human label for the toast (e.g. "ChatGPT Team · CR").
     @MainActor
-    func switchTo(_ account: AuthAccount, restartApp: Bool) async -> NativeSwitchOutcome {
+    func switchTo(
+        _ account: AuthAccount,
+        chatGPTAccountID: String? = nil,
+        subscriptionLabel: String? = nil,
+        restartApp: Bool
+    ) async -> NativeSwitchOutcome {
         guard supportsSwitching(account.type) else {
             return .failure(message: "Switching \(account.type.displayName) is not supported yet.")
         }
@@ -172,10 +199,13 @@ final class NativeSessionManager: ObservableObject {
         // block for ~100ms). Only the AppKit app-restart below stays on the main actor.
         let type = account.type
         let email = account.email
+        let preferredAccountID = chatGPTAccountID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
         let writeError: String? = await Task.detached(priority: .userInitiated) { [self] in
             do {
                 switch type {
-                case .codex: try writeCodexAuth(from: src)
+                case .codex: try writeCodexAuth(from: src, preferredAccountID: preferredAccountID)
                 case .claude: try writeClaudeAuth(from: src)
                 case .gemini: try writeGoogleAuth(from: src, email: email)
                 default: return "Switching \(type.displayName) is not supported yet."
@@ -188,25 +218,33 @@ final class NativeSessionManager: ObservableObject {
 
         if let writeError { return .failure(message: writeError) }
 
-        switch type {
-        case .codex:
-            return .switched(message: "Switched Codex CLI session to \(account.baseDisplayName). New `codex` runs use this account.")
-        case .claude:
-            var msg = "Switched Claude session to \(account.baseDisplayName)."
-            if restartApp, await restartRunningApp(bundleIDs: ["com.anthropic.claudefordesktop"], names: ["Claude"]) {
-                msg += " Restarted Claude desktop."
+        // Update live identity from disk immediately (full account list refresh follows via UI).
+        if let identity = detectIdentity(for: type) {
+            currentByProvider[type] = identity
+            if matches(account, identity) {
+                currentAccountIDs.insert(account.id)
             }
-            return .switched(message: msg)
-        case .gemini:
-            return .switched(message: "Switched \(type.displayName) session to \(account.baseDisplayName). New Gemini CLI runs use this account.")
-        default:
-            return .failure(message: "Switching \(type.displayName) is not supported yet.")
         }
+
+        let targetName = subscriptionLabel?.nilIfEmpty
+            ?? account.baseDisplayName
+        var msg = "Switched \(type.displayName) to \(targetName)."
+        if restartApp {
+            let restarted = await restartApps(for: type)
+            if !restarted.isEmpty {
+                msg += " Restarted \(restarted.joined(separator: ", "))."
+            } else {
+                msg += " Native auth written — launch \(type.displayName) to pick it up."
+            }
+        } else {
+            msg += " Restart the app (or enable restart-on-switch in Settings) to load it."
+        }
+        return .switched(message: msg)
     }
 
     // MARK: - Native writers
 
-    private func writeCodexAuth(from src: [String: Any]) throws {
+    private func writeCodexAuth(from src: [String: Any], preferredAccountID: String? = nil) throws {
         guard let access = nonEmpty(src["access_token"]) else {
             throw SwitchError.missingToken("access_token")
         }
@@ -216,7 +254,13 @@ final class NativeSessionManager: ObservableObject {
         var tokens: [String: Any] = ["access_token": access]
         if let idToken = nonEmpty(src["id_token"]) { tokens["id_token"] = idToken }
         if let refresh = nonEmpty(src["refresh_token"]) { tokens["refresh_token"] = refresh }
-        if let accountID = nonEmpty(src["account_id"]) ?? Self.openAIAccountID(from: Self.decodeJWT(access)) {
+        // Prefer explicit membership id (Team/Enterprise). JWT default is often Go and would
+        // make every "Switch" land on the personal plan.
+        if let preferredAccountID {
+            tokens["account_id"] = preferredAccountID
+        } else if let accountID = nonEmpty(src["account_id"])
+            ?? Self.openAIAccountID(from: Self.decodeJWT(access))
+        {
             tokens["account_id"] = accountID
         }
 
@@ -298,12 +342,62 @@ final class NativeSessionManager: ObservableObject {
         }
     }
 
-    // MARK: - App restart (quit + relaunch)
+    // MARK: - App restart (quit + relaunch) — Cockpit-style
 
-    @discardableResult
+    /// Kill provider desktop apps (and matching helper processes), then relaunch so they
+    /// re-read native auth. Mirrors Cockpit: close Codex processes → rewrite auth already
+    /// done → start Codex.app again.
     @MainActor
-    private func restartRunningApp(bundleIDs: [String], names: [String]) async -> Bool {
-        let running = NSWorkspace.shared.runningApplications.filter { app in
+    private func restartApps(for type: ServiceType) async -> [String] {
+        switch type {
+        case .codex:
+            // Official desktop + CLI helpers that pin the old account_id in memory.
+            return await killAndRelaunch(
+                label: "Codex",
+                bundleIDs: ["com.openai.codex", "com.openai.chat"],
+                names: ["Codex", "ChatGPT"],
+                pathFragments: [
+                    "Codex.app/Contents/MacOS/Codex",
+                    "ChatGPT.app/Contents/MacOS/ChatGPT",
+                ],
+                // Also force-kill detached CLI sessions so the next `codex` uses new auth.
+                processNames: ["codex"]
+            )
+        case .claude:
+            return await killAndRelaunch(
+                label: "Claude",
+                bundleIDs: ["com.anthropic.claudefordesktop", "com.anthropic.claude"],
+                names: ["Claude"],
+                pathFragments: ["Claude.app/Contents/MacOS/Claude"],
+                processNames: ["claude"]
+            )
+        case .gemini:
+            // Gemini is mostly CLI; kill long-lived CLI processes if any.
+            return await killAndRelaunch(
+                label: "Gemini",
+                bundleIDs: [],
+                names: [],
+                pathFragments: [],
+                processNames: ["gemini"]
+            )
+        default:
+            return []
+        }
+    }
+
+    /// Returns human labels of apps that were restarted (or "CLI helpers" if only processes died).
+    @MainActor
+    private func killAndRelaunch(
+        label: String,
+        bundleIDs: [String],
+        names: [String],
+        pathFragments: [String],
+        processNames: [String]
+    ) async -> [String] {
+        var relaunchURLs: [URL] = []
+        var sawRunning = false
+
+        let apps = NSWorkspace.shared.runningApplications.filter { app in
             if let bundle = app.bundleIdentifier, bundleIDs.contains(bundle) { return true }
             if let name = app.localizedName,
                names.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame })
@@ -312,23 +406,115 @@ final class NativeSessionManager: ObservableObject {
             }
             return false
         }
-        guard !running.isEmpty else { return false }
+        for app in apps {
+            sawRunning = true
+            if let url = app.bundleURL { relaunchURLs.append(url) }
+            app.terminate()
+        }
 
-        let appURL = running.first?.bundleURL
-        for app in running { app.terminate() }
+        // Path-fragment kill (Cockpit uses pgrep -f "Codex.app/Contents/MacOS/Codex").
+        let pgrepPIDs = Self.pgrepPIDs(pathFragments: pathFragments, processNames: processNames)
+        if !pgrepPIDs.isEmpty {
+            sawRunning = true
+            Self.signalPIDs(pgrepPIDs, sig: SIGTERM)
+        }
 
-        // Wait up to ~6s for a graceful quit, then force-terminate stragglers.
-        for _ in 0..<12 where running.contains(where: { !$0.isTerminated }) {
+        // Wait up to ~6s for graceful quit, then SIGKILL stragglers.
+        for _ in 0..<12 {
+            let stillApps = apps.contains(where: { !$0.isTerminated })
+            let stillPIDs = pgrepPIDs.contains(where: { Self.isPIDAlive($0) })
+            if !stillApps && !stillPIDs { break }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
-        for app in running where !app.isTerminated { app.forceTerminate() }
+        for app in apps where !app.isTerminated { app.forceTerminate() }
+        let leftover = pgrepPIDs.filter { Self.isPIDAlive($0) }
+        if !leftover.isEmpty { Self.signalPIDs(leftover, sig: SIGKILL) }
 
-        guard let appURL else { return true }
+        // Resolve launch URLs even if the app wasn't running (open from /Applications).
+        if relaunchURLs.isEmpty {
+            for name in names {
+                let candidate = URL(fileURLWithPath: "/Applications/\(name).app")
+                if fileManager.fileExists(atPath: candidate.path) {
+                    relaunchURLs.append(candidate)
+                }
+            }
+            for bundleID in bundleIDs {
+                if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+                    relaunchURLs.append(url)
+                }
+            }
+        }
+
+        // Deduplicate by path.
+        var seen = Set<String>()
+        let uniqueURLs = relaunchURLs.filter { seen.insert($0.path).inserted }
+
+        guard !uniqueURLs.isEmpty else {
+            // Only CLI processes were killed — nothing to relaunch.
+            return sawRunning ? ["\(label) processes"] : []
+        }
+
+        // Always relaunch when restart-on-switch is on (Cockpit "launch on switch"), so the
+        // user lands on the new subscription without a manual open.
         try? await Task.sleep(nanoseconds: 400_000_000)
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false
-        _ = try? await NSWorkspace.shared.openApplication(at: appURL, configuration: config)
-        return true
+        var launched: [String] = []
+        for url in uniqueURLs {
+            do {
+                _ = try await NSWorkspace.shared.openApplication(at: url, configuration: config)
+                launched.append(url.deletingPathExtension().lastPathComponent)
+            } catch {
+                // Fall through — auth is still written.
+            }
+        }
+        if launched.isEmpty, sawRunning {
+            return ["\(label) processes"]
+        }
+        return launched
+    }
+
+    private static func pgrepPIDs(pathFragments: [String], processNames: [String]) -> [Int32] {
+        var pids = Set<Int32>()
+        for fragment in pathFragments where !fragment.isEmpty {
+            for pid in runPgrep(arguments: ["-f", fragment]) { pids.insert(pid) }
+        }
+        for name in processNames where !name.isEmpty {
+            for pid in runPgrep(arguments: ["-x", name]) { pids.insert(pid) }
+        }
+        // Never signal ourselves.
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        pids.remove(selfPID)
+        return Array(pids)
+    }
+
+    private static func runPgrep(arguments: [String]) -> [Int32] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return []
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        return text.split(whereSeparator: \.isNewline).compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+    }
+
+    private static func signalPIDs(_ pids: [Int32], sig: Int32) {
+        for pid in pids where pid > 1 {
+            kill(pid, sig)
+        }
+    }
+
+    private static func isPIDAlive(_ pid: Int32) -> Bool {
+        guard pid > 1 else { return false }
+        return kill(pid, 0) == 0
     }
 
     // MARK: - Keychain (Claude)
@@ -488,5 +674,12 @@ final class NativeSessionManager: ObservableObject {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return f.string(from: Date())
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        let t = trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
     }
 }
