@@ -412,6 +412,74 @@ final class ProviderWiringTests: XCTestCase {
         )
     }
 
+    func testPreferredPlanTypeDoesNotDemoteTeamToGoUsageBody() {
+        // wham/usage often echoes plan_type=go when the access token is still personal-scoped.
+        let preferred = ChatGPTPlanFormatter.preferredPlanType(
+            usagePlan: "go",
+            membershipPlan: "team",
+            jwtPlan: "go",
+            structure: "workspace",
+            workspaceName: "CR"
+        )
+        XCTAssertEqual(preferred, "team")
+    }
+
+    func testCodexKeychainAccountNameIsStableCliPrefix() {
+        let home = URL(fileURLWithPath: "/Users/example/.codex")
+        let name = CodexWorkspaceCredentials.keychainAccountName(codexHome: home)
+        XCTAssertTrue(name.hasPrefix("cli|"))
+        XCTAssertEqual(name.count, 4 + 16) // "cli|" + 16 hex chars
+        XCTAssertEqual(name, CodexWorkspaceCredentials.keychainAccountName(codexHome: home))
+    }
+
+    func testCodexResolveRejectsForeignSeatWithoutMatchingJWT() {
+        // Seed token claims personal seat; asking for a different workspace must not silently
+        // return the personal JWT (that is the multi-sub switch bug).
+        let goAccountID = "b8490ad0-efd0-4413-a1f3-38e7e1dcb977"
+        let teamAccountID = "f7268a18-b7e1-42d3-b4b1-286f67b74b4d"
+        let fakeJWT = Self.makeUnsignedJWT(auth: [
+            "chatgpt_account_id": goAccountID,
+            "chatgpt_plan_type": "go",
+        ])
+        let seed: [String: Any] = [
+            "access_token": fakeJWT,
+            "account_id": goAccountID,
+            "email": "user@example.com",
+            "type": "codex",
+        ]
+        let resolved = CodexWorkspaceCredentials.resolve(
+            preferredAccountID: teamAccountID,
+            seed: seed,
+            email: "user@example.com"
+        )
+        // Without a team-scoped token in seed/cockpit/cli-proxy, resolve must fail closed.
+        if let resolved {
+            XCTAssertEqual(resolved.accountID.lowercased(), teamAccountID.lowercased())
+            XCTAssertNotEqual(
+                CodexWorkspaceCredentials.chatgptAccountID(from: resolved.accessToken)?.lowercased(),
+                goAccountID.lowercased(),
+                "must not return Go JWT for Team seat"
+            )
+        } else {
+            XCTAssertNil(resolved)
+        }
+    }
+
+    /// Minimal unsigned JWT for unit tests (header.payload.sig) — only payload is parsed.
+    private static func makeUnsignedJWT(auth: [String: Any]) -> String {
+        let header = Data(#"{"alg":"none","typ":"JWT"}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let payloadObj: [String: Any] = ["https://api.openai.com/auth": auth]
+        let payloadData = try! JSONSerialization.data(withJSONObject: payloadObj)
+        let payload = payloadData.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "\(header).\(payload).sig"
+    }
+
     func testCodexSnapshotCanHoldMultipleSubscriptions() {
         let go = ProviderUsageSubAccount(
             id: "acc-go",

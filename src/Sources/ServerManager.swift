@@ -415,18 +415,7 @@ class ServerManager: ObservableObject {
         authProcess.standardError = errorPipe
         authProcess.standardInput = inputPipe
         
-        // For Copilot, we need to capture the device code from output
         let capture = OutputCapture()
-        
-        if case .copilotLogin = command {
-            outputPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if let str = String(data: data, encoding: .utf8), !str.isEmpty {
-                    capture.text += str
-                    NSLog("[Auth] Copilot output: %@", str)
-                }
-            }
-        }
         
         // For Gemini login, automatically send newline to accept default project
         if case .geminiLogin = command {
@@ -470,18 +459,75 @@ class ServerManager: ObservableObject {
                 }
             }
         }
+
+        // Capture all provider output (not just Copilot) for diagnostics / device codes.
+        outputPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if let str = String(data: data, encoding: .utf8), !str.isEmpty {
+                capture.text += str
+                if case .copilotLogin = command {
+                    NSLog("[Auth] Copilot output: %@", str)
+                }
+            }
+        }
+        errorPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if let str = String(data: data, encoding: .utf8), !str.isEmpty {
+                capture.text += str
+            }
+        }
         
         // Set environment to inherit from parent
         authProcess.environment = ProcessInfo.processInfo.environment
+
+        // Snapshot auth dir *before* login so we can detect real credential writes.
+        let preAuthSnapshot = AuthAccountLifecycle.authFileSnapshot()
+        let completionOnce = AuthCompletionBox(completion: completion)
 
         authProcess.terminationHandler = { [weak self] process in
             let exitCode = process.terminationStatus
             NSLog("[Auth] Process terminated with exit code: %d", exitCode)
             self?.clearActiveAuthProcess(process)
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            errorPipe.fileHandleForReading.readabilityHandler = nil
 
-            if exitCode == 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // Give CLIProxy a moment to flush the new auth JSON to disk.
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.6) {
+                AuthAccountLifecycle.clearTombstonesForPresentCodexSeats()
+                let changed = AuthAccountLifecycle.authFilesChanged(since: preAuthSnapshot)
+                let names = changed.map(\.lastPathComponent)
+                NSLog(
+                    "[Auth] Exit %d — auth files changed: %@",
+                    exitCode,
+                    names.isEmpty ? "(none)" : names.joined(separator: ", ")
+                )
+
+                DispatchQueue.main.async {
                     NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
+                }
+
+                if !changed.isEmpty {
+                    let list = names.joined(separator: "\n• ")
+                    completionOnce.finish(
+                        true,
+                        "✓ Account credentials saved.\n\n• \(list)\n\nThe account list will refresh automatically."
+                    )
+                    return
+                }
+
+                if exitCode == 0 {
+                    // Exit 0 but no new files — often re-login of the same seat (overwrite).
+                    // Treat as soft success if any matching provider file exists and was recently touched.
+                    completionOnce.finish(
+                        true,
+                        "✓ Authentication finished.\n\nIf you don't see a new account, you may have re-authorized an existing seat (same email/workspace). Open Settings and refresh."
+                    )
+                } else {
+                    let detail = capture.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let message = detail.isEmpty
+                        ? "Authentication exited with code \(exitCode) and no credentials were saved."
+                        : "Authentication failed (exit \(exitCode)).\n\n\(String(detail.suffix(500)))"
+                    completionOnce.finish(false, message)
                 }
             }
         }
@@ -492,76 +538,74 @@ class ServerManager: ObservableObject {
             try authProcess.run()
             addLog("✓ Authentication process started (PID: \(authProcess.processIdentifier)) - browser should open shortly")
             NSLog("[Auth] Process started with PID: %d", authProcess.processIdentifier)
-            
-            // Wait briefly to check if process crashes immediately or to capture output
-            let waitTime: TimeInterval = (command == .copilotLogin) ? 2.0 : 1.0
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + waitTime) {
-                if authProcess.isRunning {
-                    // Process is still running - check for Copilot device code
-                    NSLog("[Auth] Process running after wait, returning success")
-                    
-                    // For Copilot, try to extract the device code from output
-                    if case .copilotLogin = command {
-                        // Extract code from output like "enter the code: XXXX-XXXX"
-                        if let codeRange = capture.text.range(of: "enter the code: "),
-                           let endRange = capture.text[codeRange.upperBound...].range(of: "\n") {
-                            let code = String(capture.text[codeRange.upperBound..<endRange.lowerBound]).trimmingCharacters(in: .whitespaces)
-                            // Copy code to clipboard
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(code, forType: .string)
-                            completion(true, "🌐 Browser opened for GitHub authentication.\n\n📋 Code copied to clipboard:\n\n\(code)\n\nJust paste it in the browser!\n\nThe app will automatically detect when you're authenticated.")
-                            return
-                        } else if capture.text.contains("enter the code:") {
-                            // Try simpler extraction
-                            let lines = capture.text.components(separatedBy: "\n")
-                            for line in lines {
-                                if line.contains("enter the code:") {
-                                    let parts = line.components(separatedBy: "enter the code:")
-                                    if parts.count > 1 {
-                                        let code = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
-                                        // Copy code to clipboard
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(code, forType: .string)
-                                        completion(true, "🌐 Browser opened for GitHub authentication.\n\n📋 Code copied to clipboard:\n\n\(code)\n\nJust paste it in the browser!\n\nThe app will automatically detect when you're authenticated.")
-                                        return
-                                    }
-                                }
-                            }
-                        }
-                        // Fallback if we couldn't extract the code
-                        completion(true, "🌐 Browser opened for GitHub authentication.\n\nCheck your terminal or the opened browser for the device code.\n\nThe app will automatically detect when you're authenticated.")
-                        return
-                    }
-                    
-                    completion(true, "🌐 Browser opened for authentication.\n\nPlease complete the login in your browser.\n\nThe app will automatically detect when you're authenticated.")
-                } else {
-                    // Process died quickly - check for error
-                    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                    
-                    var output = String(data: outputData, encoding: .utf8) ?? ""
-                    if output.isEmpty { output = capture.text }
-                    let error = String(data: errorData, encoding: .utf8) ?? ""
-                    
-                    NSLog("[Auth] Process died quickly - output: %@", output.isEmpty ? "(empty)" : String(output.prefix(200)))
-                    
-                    if output.contains("Opening browser") || output.contains("Attempting to open URL") {
-                        // Browser opened but process finished (probably success)
-                        NSLog("[Auth] Browser opened, process completed")
-                        completion(true, "🌐 Browser opened for authentication.\n\nPlease complete the login in your browser.\n\nThe app will automatically detect when you're authenticated.")
-                    } else {
-                        // Real error
-                        NSLog("[Auth] Process failed")
-                        let message = error.isEmpty ? (output.isEmpty ? "Authentication process failed unexpectedly" : output) : error
-                        completion(false, message)
+
+            // Early UX for Copilot device code only — final success still waits for credentials.
+            if case .copilotLogin = command {
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) {
+                    guard authProcess.isRunning else { return }
+                    if let code = Self.extractCopilotDeviceCode(from: capture.text) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(code, forType: .string)
+                        NSLog("[Auth] Copilot device code ready: %@", code)
                     }
                 }
+            }
+
+            // Hard timeout so Settings cannot spin forever if the browser is abandoned.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10 * 60) { [weak self] in
+                guard authProcess.isRunning else { return }
+                NSLog("[Auth] Login timed out after 10 minutes — terminating")
+                authProcess.terminate()
+                self?.clearActiveAuthProcess(authProcess)
+                completionOnce.finish(
+                    false,
+                    "Authentication timed out after 10 minutes. Complete the browser login sooner, or try again."
+                )
             }
         } catch {
             clearActiveAuthProcess(authProcess)
             NSLog("[Auth] Failed to start: %@", error.localizedDescription)
-            completion(false, "Failed to start auth process: \(error.localizedDescription)")
+            completionOnce.finish(false, "Failed to start auth process: \(error.localizedDescription)")
         }
+    }
+
+    /// Ensures auth completion fires exactly once (timeout vs termination race).
+    private final class AuthCompletionBox {
+        private let lock = NSLock()
+        private var done = false
+        private let completion: (Bool, String) -> Void
+
+        init(completion: @escaping (Bool, String) -> Void) {
+            self.completion = completion
+        }
+
+        func finish(_ success: Bool, _ message: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !done else { return }
+            done = true
+            DispatchQueue.main.async {
+                self.completion(success, message)
+            }
+        }
+    }
+
+    private static func extractCopilotDeviceCode(from text: String) -> String? {
+        if let codeRange = text.range(of: "enter the code: "),
+           let endRange = text[codeRange.upperBound...].range(of: "\n")
+        {
+            let code = String(text[codeRange.upperBound..<endRange.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !code.isEmpty { return code }
+        }
+        for line in text.components(separatedBy: "\n") where line.contains("enter the code:") {
+            let parts = line.components(separatedBy: "enter the code:")
+            if parts.count > 1 {
+                let code = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !code.isEmpty { return code }
+            }
+        }
+        return nil
     }
 
     private func terminateActiveAuthProcessIfNeeded(reason: String) {

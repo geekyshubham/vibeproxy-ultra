@@ -148,6 +148,10 @@ class AuthManager: ObservableObject {
     private func scanAuthDirectory() -> [ServiceType: [AuthAccount]] {
         let authDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cli-proxy-api")
 
+        // NOTE: Do NOT materialize/write seat files here. Writing under ~/.cli-proxy-api trips the
+        // FSEvent monitor → authDirectoryChanged → checkAuthStatus → write again (quota thrash).
+        // Seat normalization only runs on explicit switch/import.
+
         var newAccounts: [ServiceType: [AuthAccount]] = [:]
         for type in ServiceType.allCases {
             newAccounts[type] = []
@@ -241,7 +245,15 @@ class AuthManager: ObservableObject {
     }
 
     /// Stable identity used only for UI/list dedupe (does not delete files on disk).
-    private static func identityKey(for account: AuthAccount) -> String {
+    /// Codex/ChatGPT: email alone is NOT unique — one login can own Go + Team seats
+    /// (Cockpit stores them as separate accounts keyed by chatgpt_account_id).
+    static func identityKey(for account: AuthAccount) -> String {
+        if account.type == .codex {
+            if let seat = codexSeatIdentity(for: account) {
+                return seat
+            }
+        }
+
         if let email = account.email?.trimmingCharacters(in: .whitespacesAndNewlines),
            !email.isEmpty
         {
@@ -273,6 +285,35 @@ class AuthManager: ObservableObject {
         return "file:" + account.id
     }
 
+    /// `email|account_id` when either JWT or stored account_id is present.
+    private static func codexSeatIdentity(for account: AuthAccount) -> String? {
+        guard let data = try? Data(contentsOf: account.filePath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        let access = json["access_token"] as? String
+        let accountID = CodexWorkspaceCredentials.chatgptAccountID(from: access)
+            ?? (json["account_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let email = (account.email ?? json["email"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if let accountID, !accountID.isEmpty {
+            let mail = (email?.isEmpty == false) ? email! : "unknown"
+            return "codex-seat:\(mail)|\(accountID.lowercased())"
+        }
+        // codex-seat-{uuid}.json filename fallback
+        let name = account.filePath.deletingPathExtension().lastPathComponent.lowercased()
+        if name.hasPrefix("codex-seat-") {
+            let id = String(name.dropFirst("codex-seat-".count))
+            if !id.isEmpty {
+                let mail = (email?.isEmpty == false) ? email! : "unknown"
+                return "codex-seat:\(mail)|\(id)"
+            }
+        }
+        return nil
+    }
+
     private static func prefers(_ candidate: AuthAccount, over existing: AuthAccount) -> Bool {
         // Enabled beats disabled.
         if candidate.isDisabled != existing.isDisabled {
@@ -281,6 +322,20 @@ class AuthManager: ObservableObject {
         // Usable session beats expired.
         if candidate.isExpired != existing.isExpired {
             return !candidate.isExpired
+        }
+        // Prefer JWT-fresher access tokens (real re-login) over older duplicates.
+        if candidate.type == .codex {
+            let cExp = codexAccessExpiry(at: candidate.filePath) ?? .distantPast
+            let eExp = codexAccessExpiry(at: existing.filePath) ?? .distantPast
+            if cExp != eExp {
+                return cExp > eExp
+            }
+        }
+        // Prefer canonical filenames over seat clones / oauth noise.
+        let cCanon = codexFilenamePreference(candidate.id)
+        let eCanon = codexFilenamePreference(existing.id)
+        if cCanon != eCanon {
+            return cCanon > eCanon
         }
         // Newer auth file wins (re-login).
         let cMtime = (try? candidate.filePath.resourceValues(forKeys: [.contentModificationDateKey]))?
@@ -297,6 +352,24 @@ class AuthManager: ObservableObject {
             return cScore > eScore
         }
         return candidate.id < existing.id
+    }
+
+    /// Higher = prefer for UI when multiple files share a seat.
+    private static func codexFilenamePreference(_ filename: String) -> Int {
+        let name = filename.lowercased()
+        if name.hasPrefix("codex-seat-") { return 1 }
+        if name.contains("-team.json") || name.contains("-go.json") { return 2 }
+        // codex-email@host.json style (no uuid prefix)
+        if name.hasPrefix("codex-"), name.contains("@") { return 3 }
+        return 0
+    }
+
+    private static func codexAccessExpiry(at url: URL) -> Date? {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let access = json["access_token"] as? String
+        else { return nil }
+        return CodexWorkspaceCredentials.accessTokenExpiry(access)
     }
 
     private func applyAccounts(_ newAccounts: [ServiceType: [AuthAccount]]) {
@@ -344,18 +417,46 @@ class AuthManager: ObservableObject {
         }
     }
     
-    /// Delete a specific account's auth file
+    /// Delete an account completely: every file for that seat + tombstone so materialize cannot revive it.
     func deleteAccount(_ account: AuthAccount) -> Bool {
-        do {
-            try FileManager.default.removeItem(at: account.filePath)
-            NSLog("[AuthStatus] Deleted auth file: %@", account.filePath.path)
-            // Refresh status
+        let seatKeyBefore = AuthAccountLifecycle.seatKey(for: account)
+        let result = AuthAccountLifecycle.deleteAccountCompletely(account)
+        if result.deleted.isEmpty {
+            NSLog("[AuthStatus] Failed to delete any files for %@", account.displayName)
             checkAuthStatus()
-            return true
-        } catch {
-            NSLog("[AuthStatus] Failed to delete auth file: %@", error.localizedDescription)
             return false
         }
+        if !result.failed.isEmpty {
+            NSLog(
+                "[AuthStatus] Partial delete for %@: deleted=%d failed=%d",
+                account.displayName,
+                result.deleted.count,
+                result.failed.count
+            )
+        } else {
+            NSLog(
+                "[AuthStatus] Deleted %d auth file(s) for %@",
+                result.deleted.count,
+                account.displayName
+            )
+        }
+        // Refresh — tombstone prevents resurrection from Cockpit/siblings.
+        checkAuthStatus()
+        if let key = seatKeyBefore {
+            let stillThere = accounts(for: account.type).contains {
+                AuthAccountLifecycle.seatKey(for: $0) == key
+            }
+            if stillThere {
+                NSLog("[AuthStatus] Seat still listed after delete: %@", key)
+                return false
+            }
+        } else if accounts(for: account.type).contains(where: { $0.id == account.id }) {
+            NSLog("[AuthStatus] Account file still listed after delete: %@", account.id)
+            return false
+        }
+        // Do not post authDirectoryChanged here — the FSEvent monitor already sees the delete
+        // and posting again caused double refresh storms after multi-file seat deletion.
+        return true
     }
 
     /// Returns a date only when the *session* is truly unusable (needs re-login).

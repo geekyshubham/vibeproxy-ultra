@@ -100,8 +100,9 @@ final class NativeSessionManager: ObservableObject {
             else { continue }
             identities[type] = identity
 
-            if let match = (accounts[type] ?? []).first(where: { matches($0, identity) }) {
-                ids.insert(match.id)
+            // Mark every matching seat file (Codex can have Go + Team rows for one email).
+            for account in accounts[type] ?? [] where matches(account, identity) {
+                ids.insert(account.id)
             }
         }
         return (identities, ids)
@@ -157,29 +158,52 @@ final class NativeSessionManager: ObservableObject {
     }
 
     private func matches(_ account: AuthAccount, _ identity: NativeSessionIdentity) -> Bool {
+        // Codex: seat id is authoritative. Email alone must NOT mark every Go/Team row current.
+        if account.type == .codex {
+            let fileID = codexAccountID(from: account)
+            if let identityID = identity.accountID?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !identityID.isEmpty,
+               let fileID,
+               fileID.caseInsensitiveCompare(identityID) == .orderedSame
+            {
+                return true
+            }
+            // No seat id on either side — fall through to email.
+            if fileID != nil, identity.accountID != nil {
+                return false
+            }
+        }
         if let email = account.email?.lowercased(),
            let other = identity.email?.lowercased(),
            email == other
         {
             return true
         }
-        // Codex: also match by stable account_id from the stored file.
-        if account.type == .codex,
-           let identityID = identity.accountID,
-           let payload = readJSON(account.filePath),
-           let fileID = payload["account_id"] as? String,
-           fileID == identityID
-        {
-            return true
-        }
         return false
+    }
+
+    private func codexAccountID(from account: AuthAccount) -> String? {
+        guard let payload = readJSON(account.filePath) else { return nil }
+        if let access = payload["access_token"] as? String,
+           let id = Self.openAIAccountID(from: Self.decodeJWT(access)),
+           !id.isEmpty
+        {
+            return id
+        }
+        if let id = payload["account_id"] as? String {
+            let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return nil
     }
 
     // MARK: - Switching
 
     /// Switch the native session to `account`.
     /// - Parameter chatGPTAccountID: For Codex multi-subscription logins, the membership /
-    ///   workspace id to pin in `tokens.account_id` (Team/Enterprise vs Go).
+    ///   workspace id whose **JWT-scoped** tokens must be written (Team/Enterprise vs Go).
+    ///   Pinning `tokens.account_id` alone is not enough — the access token must belong to that seat
+    ///   (same model as Cockpit Tools' per-seat account store).
     /// - Parameter subscriptionLabel: Human label for the toast (e.g. "ChatGPT Team · CR").
     @MainActor
     func switchTo(
@@ -202,10 +226,17 @@ final class NativeSessionManager: ObservableObject {
         let preferredAccountID = chatGPTAccountID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
+        let authFilePath = account.filePath
         let writeError: String? = await Task.detached(priority: .userInitiated) { [self] in
             do {
                 switch type {
-                case .codex: try writeCodexAuth(from: src, preferredAccountID: preferredAccountID)
+                case .codex:
+                    try await writeCodexAuth(
+                        from: src,
+                        preferredAccountID: preferredAccountID,
+                        email: email,
+                        alsoUpdateAuthFile: authFilePath
+                    )
                 case .claude: try writeClaudeAuth(from: src)
                 case .gemini: try writeGoogleAuth(from: src, email: email)
                 default: return "Switching \(type.displayName) is not supported yet."
@@ -244,36 +275,112 @@ final class NativeSessionManager: ObservableObject {
 
     // MARK: - Native writers
 
-    private func writeCodexAuth(from src: [String: Any], preferredAccountID: String? = nil) throws {
-        guard let access = nonEmpty(src["access_token"]) else {
-            throw SwitchError.missingToken("access_token")
+    private func writeCodexAuth(
+        from src: [String: Any],
+        preferredAccountID: String? = nil,
+        email: String? = nil,
+        alsoUpdateAuthFile: URL? = nil
+    ) async throws {
+        // Resolve a token lineage whose JWT is scoped to the target seat, refreshing if needed
+        // (same as Cockpit prepare_account_for_injection before inject).
+        // Do not call materializeSeatAuthFiles here in a loop — one persist of the resolved seat
+        // is enough and avoids FSEvent thrash.
+        let resolved: CodexWorkspaceCredentials.Payload
+        switch await CodexWorkspaceCredentials.resolveFresh(
+            preferredAccountID: preferredAccountID,
+            seed: src,
+            email: email
+        ) {
+        case .success(let payload):
+            resolved = payload
+        case .failure(let err):
+            throw SwitchError.resolveFailed(err.localizedDescription)
         }
+
+        let access = resolved.accessToken
+        let accountID = resolved.accountID
+
         let url = home.appendingPathComponent(".codex/auth.json")
         try ensureParent(url)
 
-        var tokens: [String: Any] = ["access_token": access]
-        if let idToken = nonEmpty(src["id_token"]) { tokens["id_token"] = idToken }
-        if let refresh = nonEmpty(src["refresh_token"]) { tokens["refresh_token"] = refresh }
-        // Prefer explicit membership id (Team/Enterprise). JWT default is often Go and would
-        // make every "Switch" land on the personal plan.
-        if let preferredAccountID {
-            tokens["account_id"] = preferredAccountID
-        } else if let accountID = nonEmpty(src["account_id"])
-            ?? Self.openAIAccountID(from: Self.decodeJWT(access))
-        {
-            tokens["account_id"] = accountID
-        }
+        var tokens: [String: Any] = [
+            "access_token": access,
+            "account_id": accountID,
+        ]
+        if let idToken = resolved.idToken { tokens["id_token"] = idToken }
+        if let refresh = resolved.refreshToken { tokens["refresh_token"] = refresh }
 
         var out: [String: Any] = ["tokens": tokens]
-        // Preserve any existing API key field (usually null).
         if let existing = readJSON(url), let key = existing["OPENAI_API_KEY"], !(key is NSNull) {
             out["OPENAI_API_KEY"] = key
         } else {
             out["OPENAI_API_KEY"] = NSNull()
         }
-        out["last_refresh"] = nonEmpty(src["last_refresh"]) ?? Self.isoNow()
+        out["last_refresh"] = Self.isoNow()
 
         try backupThenWrite(json: out, to: url)
+
+        // Official Codex CLI/desktop read "Codex Auth" keychain first (Cockpit writes both).
+        let codexHome = home.appendingPathComponent(".codex")
+        _ = CodexWorkspaceCredentials.writeKeychain(authFileJSON: out, codexHome: codexHome)
+
+        // Persist BOTH seats: snapshot outgoing, write incoming seat file, update active auth file.
+        if let alsoUpdateAuthFile {
+            try snapshotOutgoingCodexSeat(from: src, beforeWriting: resolved, near: alsoUpdateAuthFile)
+            _ = CodexWorkspaceCredentials.persistSeat(resolved)
+
+            var updated = src
+            updated["access_token"] = resolved.accessToken
+            if let refresh = resolved.refreshToken { updated["refresh_token"] = refresh }
+            if let idToken = resolved.idToken { updated["id_token"] = idToken }
+            updated["account_id"] = resolved.accountID
+            if let plan = resolved.planType { updated["plan_type"] = plan }
+            if let mail = resolved.email ?? email { updated["email"] = mail }
+            updated["last_refresh"] = Self.isoNow()
+            updated["type"] = "codex"
+            try backupThenWrite(json: updated, to: alsoUpdateAuthFile)
+
+            // Durable per-seat file already written via persistSeat above.
+        }
+    }
+
+    /// When leaving seat A for seat B, persist A under `codex-seat-{accountID}.json`.
+    private func snapshotOutgoingCodexSeat(
+        from src: [String: Any],
+        beforeWriting incoming: CodexWorkspaceCredentials.Payload,
+        near authFile: URL
+    ) throws {
+        guard let outgoingAccess = nonEmpty(src["access_token"]) else { return }
+        let outgoingID = CodexWorkspaceCredentials.chatgptAccountID(from: outgoingAccess)
+            ?? nonEmpty(src["account_id"])
+        guard let outgoingID,
+              outgoingID.caseInsensitiveCompare(incoming.accountID) != .orderedSame
+        else { return }
+
+        let plan = CodexWorkspaceCredentials.chatgptPlanType(from: outgoingAccess)
+            ?? nonEmpty(src["plan_type"])
+        let email = nonEmpty(src["email"])
+            ?? JWTEmailExtractor.email(from: nonEmpty(src["id_token"]))
+            ?? JWTEmailExtractor.email(from: outgoingAccess)
+
+        var snap = src
+        snap["type"] = "codex"
+        snap["account_id"] = outgoingID
+        if let plan { snap["plan_type"] = plan }
+        if let email { snap["email"] = email }
+
+        let seatURL = authFile.deletingLastPathComponent()
+            .appendingPathComponent(CodexWorkspaceCredentials.seatFilename(accountID: outgoingID))
+        // Prefer not to clobber a fresher live seat file with an older snapshot.
+        if let existing = readJSON(seatURL),
+           let existingAccess = nonEmpty(existing["access_token"]),
+           let existingExp = CodexWorkspaceCredentials.accessTokenExpiry(existingAccess),
+           let outgoingExp = CodexWorkspaceCredentials.accessTokenExpiry(outgoingAccess),
+           existingExp > outgoingExp
+        {
+            return
+        }
+        try backupThenWrite(json: snap, to: seatURL)
     }
 
     private func writeClaudeAuth(from src: [String: Any]) throws {
@@ -619,9 +726,13 @@ final class NativeSessionManager: ObservableObject {
 
     enum SwitchError: LocalizedError {
         case missingToken(String)
+        case resolveFailed(String)
         var errorDescription: String? {
             switch self {
-            case .missingToken(let name): return "stored account is missing \(name)"
+            case .missingToken(let name):
+                return "stored account is missing \(name)"
+            case .resolveFailed(let message):
+                return message
             }
         }
     }

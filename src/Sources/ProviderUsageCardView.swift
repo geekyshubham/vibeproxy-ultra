@@ -795,7 +795,7 @@ private struct AccountUsageBlock: View {
             .controlSize(.small)
             .tint(tint)
             .disabled(isSwitching)
-            .help("Pin this ChatGPT subscription (writes tokens.account_id=\(sub.id)) and restart Codex so it uses \(sub.title), not Go.")
+            .help("Switch Codex to this seat using a JWT scoped to account_id=\(sub.id) (auth.json + Keychain, same as Cockpit). Needs an OAuth session for this workspace — not just the Go token.")
         }
     }
 
@@ -835,6 +835,13 @@ private struct AccountUsageBlock: View {
     }
 
     private var planBadge: String? {
+        // Prefer this file's own plan (auth-file / single-seat usage), not a sibling seat
+        // painted via multi-sub discovery.
+        if multiSubscription,
+           let active = usage?.subAccounts.first(where: { isActiveSubscription($0) })
+        {
+            return active.title
+        }
         if let label = usage?.planLabel, !label.isEmpty { return label }
         if let plan = usage?.planType, let pretty = ChatGPTPlanFormatter.displayName(for: plan) {
             return pretty

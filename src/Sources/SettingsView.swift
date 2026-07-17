@@ -1351,55 +1351,30 @@ struct SettingsView: View {
             NSLog("[SettingsView] Auth completed - success: %d, output: %@", success, output)
             DispatchQueue.main.async {
                 self.authenticatingService = nil
-                
+                self.authManager.checkAuthStatus()
+
                 if success {
                     self.authResultSuccess = true
-                    // For Copilot, use the output which contains the device code
-                    if serviceType == .copilot && (output.contains("Code copied") || output.contains("code:")) {
+                    // Prefer the process result (includes saved filenames / re-auth notes).
+                    if !output.isEmpty {
                         self.authResultMessage = output
                     } else {
-                        self.authResultMessage = self.successMessage(for: serviceType)
+                        self.authResultMessage = "✓ \(serviceType.displayName) authentication completed."
                     }
                     self.showingAuthResult = true
                 } else {
                     self.authResultSuccess = false
-                    self.authResultMessage = "Authentication failed. Please check if the browser opened and try again.\n\nDetails: \(output.isEmpty ? "No output from authentication process" : output)"
+                    self.authResultMessage = """
+                    Authentication failed or no credentials were saved.
+
+                    Complete the browser login fully (and pick the right ChatGPT workspace for Codex).
+                    If the browser closed early, try again.
+
+                    Details: \(output.isEmpty ? "No output from authentication process" : output)
+                    """
                     self.showingAuthResult = true
                 }
             }
-        }
-    }
-    
-    private func successMessage(for serviceType: ServiceType) -> String {
-        switch serviceType {
-        case .claude:
-            return "🌐 Browser opened for Claude Code authentication.\n\nPlease complete the login in your browser.\n\nThe app will automatically detect your credentials."
-        case .codex:
-            return "🌐 Browser opened for Codex authentication.\n\nPlease complete the login in your browser.\n\nThe app will automatically detect your credentials."
-        case .copilot:
-            return "🌐 GitHub Copilot authentication started!\n\nPlease visit github.com/login/device and enter the code shown.\n\nThe app will automatically detect your credentials."
-        case .gemini:
-            return "🌐 Browser opened for Gemini authentication.\n\nPlease complete the login in your browser.\n\n⚠️ Note: If you have multiple projects, the default project will be used."
-        case .kimi:
-            return "🌐 Browser opened for Kimi authentication.\n\nPlease complete the login in your browser.\n\nThe app will automatically detect your Kimi account."
-        case .qwen:
-            return "🌐 Browser opened for Qwen authentication.\n\nPlease complete the login in your browser."
-        case .antigravity:
-            return "🌐 Browser opened for Antigravity authentication.\n\nPlease complete the login in your browser."
-        case .kiro:
-            return "🌐 Browser opened for Kiro authentication.\n\nPlease complete the login in your browser.\n\nThe app will automatically detect your Kiro account."
-        case .grok:
-            return "🌐 Browser opened for Grok authentication.\n\nPlease complete the login in your browser.\n\nThe app will automatically detect your xAI account."
-        case .zai:
-            return "✓ Z.AI API key added successfully.\n\nYou can now use GLM models through the proxy."
-        case .cursor:
-            return "🌐 Browser opened for Cursor authentication.\n\nPlease complete the login in your browser."
-        case .codebuddy:
-            return "🌐 Browser opened for CodeBuddy authentication.\n\nPlease complete the login in your browser."
-        case .gitlab:
-            return "🌐 Browser opened for GitLab Duo authentication.\n\nPlease complete the login in your browser."
-        case .kilo:
-            return "🌐 Kilo AI device-flow authentication started.\n\nFollow the on-screen code instructions."
         }
     }
 
@@ -1622,10 +1597,13 @@ struct SettingsView: View {
             DispatchQueue.main.async {
                 self.authenticatingService = nil
                 self.qwenEmail = ""
+                self.authManager.checkAuthStatus()
                 
                 if success {
                     self.authResultSuccess = true
-                    self.authResultMessage = self.successMessage(for: .qwen)
+                    self.authResultMessage = output.isEmpty
+                        ? "✓ Qwen authentication completed."
+                        : output
                     self.showingAuthResult = true
                 } else {
                     self.authResultSuccess = false
@@ -1648,7 +1626,9 @@ struct SettingsView: View {
                 
                 if success {
                     self.authResultSuccess = true
-                    self.authResultMessage = self.successMessage(for: .zai)
+                    self.authResultMessage = output.isEmpty
+                        ? "✓ Z.AI API key added successfully."
+                        : output
                     self.showingAuthResult = true
                     self.authManager.checkAuthStatus()
                 } else {
@@ -1721,14 +1701,18 @@ struct SettingsView: View {
     private func disconnectAccount(_ account: AuthAccount) {
         let wasRunning = serverManager.isRunning
         
-        // Stop server, delete file, restart
+        // Stop server, delete all seat files + tombstone, restart
         let cleanup = {
             if self.authManager.deleteAccount(account) {
                 self.authResultSuccess = true
                 self.authResultMessage = "✓ Removed \(account.displayName) from \(account.type.displayName)"
             } else {
                 self.authResultSuccess = false
-                self.authResultMessage = "Failed to remove account"
+                self.authResultMessage = """
+                Failed to remove \(account.displayName).
+
+                If it reappears, another auth file for the same seat still exists — try Remove again, or delete matching files under ~/.cli-proxy-api/.
+                """
             }
             self.showingAuthResult = true
             

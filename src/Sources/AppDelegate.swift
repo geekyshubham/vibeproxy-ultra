@@ -401,6 +401,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         }
     }
 
+    /// Min gap between full quota re-fetches triggered by auth-dir FSEvents (not the user timer).
+    private var lastAuthDrivenUsageRefreshAt: Date = .distantPast
+    private let authDrivenUsageRefreshMinInterval: TimeInterval = 45
+
     @objc func handleAuthDirectoryChanged() {
         // Quiet background refresh only — never orderFront/activate. Token refresh and the
         // 5s config fingerprint poll rewrite files often; stealing focus here is what made
@@ -409,6 +413,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         serverManager.handleObservedConfigInputsChanged()
         authManager.checkAuthStatus()
         nativeSession.refresh(accounts: authManager.serviceAccounts.mapValues { $0.accounts })
+
+        // Debounce quota fetches: FSEvents can fire in bursts when any auth JSON is rewritten.
+        // Continuous materialize thrash used to re-enter here every second.
+        let now = Date()
+        guard now.timeIntervalSince(lastAuthDrivenUsageRefreshAt) >= authDrivenUsageRefreshMinInterval
+        else {
+            NSLog("[AppDelegate] Skipping quota refresh (debounced; last was < %.0fs ago)", authDrivenUsageRefreshMinInterval)
+            return
+        }
+        lastAuthDrivenUsageRefreshAt = now
         Task {
             await usageStore.refreshVisibleProviders(
                 from: ServiceType.allCases,

@@ -76,33 +76,85 @@ enum NativeUsageFetcher {
             return .empty(authAccountID: authAccountID, providerID: providerID, error: "Missing access token")
         }
 
-        let storedAccountID = stringValue(payload, keys: ["account_id"])
-            ?? chatgptAccountIDFromJWT(accessToken)
+        let jwtAccountID = chatgptAccountIDFromJWT(accessToken)
             ?? chatgptAccountIDFromJWT(stringValue(payload, keys: ["id_token"]))
+        let storedAccountID = stringValue(payload, keys: ["account_id"])
+            ?? jwtAccountID
         let email = stringValue(payload, keys: ["email"])
             ?? JWTEmailExtractor.email(from: stringValue(payload, keys: ["id_token"]))
             ?? JWTEmailExtractor.email(from: accessToken)
         let jwtPlan = chatgptPlanTypeFromJWT(accessToken)
             ?? chatgptPlanTypeFromJWT(stringValue(payload, keys: ["id_token"]))
 
-        // One OAuth login can own multiple ChatGPT subscriptions/workspaces (Go + Team/Enterprise).
-        let memberships = await fetchChatGPTAccountMemberships(accessToken: accessToken)
-        let targets = codexUsageTargets(
-            memberships: memberships,
-            storedAccountID: storedAccountID,
-            jwtPlan: jwtPlan
+        // Seat-scoped token lineages (Cockpit keeps one OAuth session per ChatGPT account_id).
+        // A Go JWT + ChatGPT-Account-Id:team still returns Go limits — wrong token, not wrong header.
+        let seatTokens = CodexWorkspaceCredentials.allSeats(seed: payload, email: email)
+        let seatByID: [String: CodexWorkspaceCredentials.Payload] = Dictionary(
+            seatTokens.map { ($0.accountID.lowercased(), $0) },
+            uniquingKeysWith: { first, _ in first }
         )
+
+        // Memberships are only for labels / optional multi-sub discovery.
+        let memberships = await fetchChatGPTAccountMemberships(accessToken: accessToken)
+
+        // IMPORTANT: This auth *file* is one seat (JWT account_id). Do not paint every
+        // membership as a sub-row on every duplicate file — that made two shubham rows both
+        // show Go+Team and the wrong plan chip. Scope targets to this file's seat when known.
+        let thisSeatID = (jwtAccountID ?? storedAccountID)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let targets: [CodexUsageTarget]
+        if let thisSeatID, !thisSeatID.isEmpty {
+            let membership = memberships.first {
+                ($0.accountID ?? "").caseInsensitiveCompare(thisSeatID) == .orderedSame
+            }
+            targets = [
+                CodexUsageTarget(
+                    accountID: thisSeatID,
+                    planType: membership?.planType ?? jwtPlan,
+                    workspaceName: membership?.workspaceName,
+                    structure: membership?.structure,
+                    role: membership?.role
+                )
+            ]
+        } else {
+            targets = codexUsageTargets(
+                memberships: memberships,
+                storedAccountID: storedAccountID,
+                jwtPlan: jwtPlan,
+                knownSeatIDs: seatTokens.map(\.accountID)
+            )
+        }
 
         var subAccounts: [ProviderUsageSubAccount] = []
         for target in targets {
-            if let result = await requestCodexUsagePayload(
-                accessToken: accessToken,
-                chatGPTAccountID: target.accountID
-            ) {
+            let targetID = target.accountID
+            let seat = targetID.flatMap { seatByID[$0.lowercased()] }
+            // Only use a token whose JWT is for this seat (or seed when seat is unknown).
+            let tokenForSeat: String? = {
+                if let seat { return seat.accessToken }
+                if let targetID, let jwtAccountID,
+                   targetID.caseInsensitiveCompare(jwtAccountID) == .orderedSame
+                {
+                    return accessToken
+                }
+                if targetID == nil { return accessToken }
+                return nil
+            }()
+            let seatJWTPlan = seat.flatMap { CodexWorkspaceCredentials.chatgptPlanType(from: $0.accessToken) }
+                ?? (tokenForSeat == accessToken ? jwtPlan : nil)
+
+            if let tokenForSeat,
+               let result = await requestCodexUsagePayload(
+                accessToken: tokenForSeat,
+                chatGPTAccountID: targetID ?? seat?.accountID
+               )
+            {
+                // Reject cross-seat bleed: if we asked for team but body still says go with go windows
+                // and membership is team, keep membership plan label from accounts/check.
                 let planType = ChatGPTPlanFormatter.preferredPlanType(
                     usagePlan: result.planType,
-                    membershipPlan: target.planType,
-                    jwtPlan: jwtPlan,
+                    membershipPlan: target.planType ?? seat?.planType,
+                    jwtPlan: seatJWTPlan,
                     structure: target.structure,
                     workspaceName: target.workspaceName
                 )
@@ -111,21 +163,41 @@ enum NativeUsageFetcher {
                     workspaceName: target.workspaceName,
                     structure: target.structure
                 )
-                subAccounts.append(
-                    ProviderUsageSubAccount(
-                        id: target.accountID ?? title,
-                        title: title,
-                        subtitle: codexMembershipSubtitle(structure: target.structure, role: target.role, planType: planType),
-                        planType: planType,
-                        windows: result.windows.map(enrichResetDescription),
-                        errorMessage: nil
-                    )
+                // If usage plan clearly mismatches a higher membership (e.g. go body for team seat)
+                // and we only had a wrong-token fallback, surface that rather than Go limits as Team.
+                let usageLooksWrongSeat = usagePlanMismatchesMembership(
+                    usagePlan: result.planType,
+                    membershipPlan: target.planType,
+                    structure: target.structure
                 )
+                if usageLooksWrongSeat, seat == nil {
+                    subAccounts.append(
+                        ProviderUsageSubAccount(
+                            id: targetID ?? title,
+                            title: title,
+                            subtitle: codexMembershipSubtitle(structure: target.structure, role: target.role, planType: planType),
+                            planType: planType,
+                            windows: [],
+                            errorMessage: "No OAuth session for this seat — re-login with this workspace selected (or import from Cockpit)"
+                        )
+                    )
+                } else {
+                    subAccounts.append(
+                        ProviderUsageSubAccount(
+                            id: targetID ?? title,
+                            title: title,
+                            subtitle: codexMembershipSubtitle(structure: target.structure, role: target.role, planType: planType),
+                            planType: planType,
+                            windows: result.windows.map(enrichResetDescription),
+                            errorMessage: nil
+                        )
+                    )
+                }
             } else {
                 let planType = ChatGPTPlanFormatter.preferredPlanType(
                     usagePlan: nil,
-                    membershipPlan: target.planType,
-                    jwtPlan: jwtPlan,
+                    membershipPlan: target.planType ?? seat?.planType,
+                    jwtPlan: seatJWTPlan,
                     structure: target.structure,
                     workspaceName: target.workspaceName
                 )
@@ -134,14 +206,23 @@ enum NativeUsageFetcher {
                     workspaceName: target.workspaceName,
                     structure: target.structure
                 )
+                let err: String
+                if seat == nil,
+                   let targetID,
+                   jwtAccountID?.caseInsensitiveCompare(targetID) != .orderedSame
+                {
+                    err = "No OAuth session for this seat — re-login with this workspace selected (or import from Cockpit)"
+                } else {
+                    err = "Could not load limits for this subscription"
+                }
                 subAccounts.append(
                     ProviderUsageSubAccount(
-                        id: target.accountID ?? title,
+                        id: targetID ?? title,
                         title: title,
                         subtitle: codexMembershipSubtitle(structure: target.structure, role: target.role, planType: planType),
                         planType: planType,
                         windows: [],
-                        errorMessage: "Could not load limits for this subscription"
+                        errorMessage: err
                     )
                 )
             }
@@ -313,7 +394,8 @@ enum NativeUsageFetcher {
     private static func codexUsageTargets(
         memberships: [CodexUsageTarget],
         storedAccountID: String?,
-        jwtPlan: String?
+        jwtPlan: String?,
+        knownSeatIDs: [String] = []
     ) -> [CodexUsageTarget] {
         if !memberships.isEmpty {
             let paid = memberships.filter { ($0.planType ?? "").lowercased() != "free" }
@@ -328,6 +410,19 @@ enum NativeUsageFetcher {
             }
         }
 
+        // Memberships list unavailable — still surface known seat token lineages (e.g. Cockpit).
+        if !knownSeatIDs.isEmpty {
+            return knownSeatIDs.map { id in
+                CodexUsageTarget(
+                    accountID: id,
+                    planType: nil,
+                    workspaceName: nil,
+                    structure: nil,
+                    role: nil
+                )
+            }
+        }
+
         return [
             CodexUsageTarget(
                 accountID: storedAccountID,
@@ -337,6 +432,23 @@ enum NativeUsageFetcher {
                 role: nil
             )
         ]
+    }
+
+    /// True when usage body plan is clearly the personal/default seat while membership says Team/Enterprise.
+    private static func usagePlanMismatchesMembership(
+        usagePlan: String?,
+        membershipPlan: String?,
+        structure: String?
+    ) -> Bool {
+        let usage = (usagePlan ?? "").lowercased()
+        let membership = (membershipPlan ?? "").lowercased()
+        let structLower = (structure ?? "").lowercased()
+        let membershipIsWorkspace = membership == "team"
+            || membership == "enterprise"
+            || membership == "business"
+            || structLower == "workspace"
+        let usageIsPersonal = usage == "go" || usage == "free" || usage == "plus"
+        return membershipIsWorkspace && usageIsPersonal
     }
 
     private static func codexMembershipSubtitle(structure: String?, role: String?, planType: String?) -> String? {
