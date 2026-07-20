@@ -248,10 +248,19 @@ class ThinkingProxy {
             NSLog("[ThinkingProxy] Rewriting Amp provider path: \(path) -> \(rewrittenPath)")
         }
         
+        // CLIProxy management UI + API live on the backend (8318). Never send these to Amp.
+        let isCliProxyManagement =
+            rewrittenPath == "/management.html"
+            || rewrittenPath.hasPrefix("/management")
+            || rewrittenPath.hasPrefix("/v0/management")
+            || rewrittenPath.hasPrefix("/static/")
+            || rewrittenPath.hasPrefix("/assets/")
+
         // Check if this is an Amp management request (anything not targeting provider or /v1)
         // Note: /provider/ paths are already rewritten to /api/provider/ above
         let isProviderPath = rewrittenPath.starts(with: "/api/provider/")
         let isCliProxyPath = rewrittenPath.starts(with: "/v1/") || rewrittenPath.starts(with: "/api/v1/")
+            || isCliProxyManagement
         if !isProviderPath && !isCliProxyPath {
             let ampPath = rewrittenPath
             NSLog("[ThinkingProxy] Amp management request detected, forwarding to ampcode.com: \(ampPath)")

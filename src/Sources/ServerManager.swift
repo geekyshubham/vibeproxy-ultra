@@ -941,6 +941,12 @@ class ServerManager: ObservableObject {
             )
         }
 
+        // Management UI requires a non-empty secret-key; empty → 404 "Management API not found".
+        ConfigComposer.ensureManagementSecretKey(
+            in: &mergedRoot,
+            plaintextKey: ManagementCredentials.secretKey
+        )
+
         do {
             try FileManager.default.createDirectory(at: authDir, withIntermediateDirectories: true)
             let mergedContent = try Yams.dump(object: mergedRoot)

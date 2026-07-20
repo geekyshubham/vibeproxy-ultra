@@ -1,8 +1,12 @@
 name: Auto Release
 
+# NOTE: The scheduled trigger is intentionally disabled. The management UI is now
+# built from the vendored fork in third_party/CLIProxyAPI and embedded into
+# cli-proxy-api-plus at release time. Upstream bumps are a MANUAL re-vendor (copy
+# the patched fork + rebuild), not an automatic download — an unattended
+# auto-release would ship the STOCK upstream panel and wipe our custom UI.
+# Trigger manually via workflow_dispatch after a deliberate re-vendor.
 on:
-  schedule:
-    - cron: '30 */12 * * *' # Runs every 12 hours as backup (30 min offset from update-cliproxyapi.yml)
   workflow_dispatch:
 
 permissions:

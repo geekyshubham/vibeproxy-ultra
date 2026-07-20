@@ -728,7 +728,33 @@ struct SettingsView: View {
                             openAuthFolder()
                         }
                     }
+
+                    HStack {
+                        Text("Management UI")
+                        Spacer()
+                        Button("Open") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(ManagementCredentials.secretKey, forType: .string)
+                            NSWorkspace.shared.open(ManagementCredentials.managementHTMLURL)
+                        }
+                        .help("Opens \(ManagementCredentials.backendBaseURL)/management.html — key: \(ManagementCredentials.secretKey)")
+                    }
+
+                    HStack {
+                        Text("Management key")
+                        Spacer()
+                        Text(ManagementCredentials.secretKey)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        Button("Copy") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(ManagementCredentials.secretKey, forType: .string)
+                        }
+                    }
                 }
+
+                CLIHarnessSettingsSection(proxyPort: 8317)
 
                 ConfiguredAppsImportPanel(
                     authManager: authManager,

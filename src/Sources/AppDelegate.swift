@@ -396,9 +396,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     }
 
     @objc func openDashboard() {
-        if let url = URL(string: "http://localhost:8318/management.html") {
-            NSWorkspace.shared.open(url)
-        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(ManagementCredentials.secretKey, forType: .string)
+        NSWorkspace.shared.open(ManagementCredentials.managementHTMLURL)
     }
 
     /// Min gap between full quota re-fetches triggered by auth-dir FSEvents (not the user timer).

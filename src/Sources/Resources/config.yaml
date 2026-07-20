@@ -8,10 +8,12 @@ host: 127.0.0.1
 amp-upstream-url: "https://ampcode.com"
 amp-restrict-management-to-localhost: true
 
-# Management API settings
+# Management API settings (required for /management.html)
+# Empty secret-key disables the Management API entirely (404 on /v0/management/*).
+# Plaintext is bcrypt-hashed by CLIProxyAPI on first load.
 remote-management:
   allow-remote: false
-  secret-key: ""  # Leave empty to disable management API
+  secret-key: "vibeproxy-admin"
 
 # Authentication directory (stores OAuth tokens)
 auth-dir: "~/.cli-proxy-api"

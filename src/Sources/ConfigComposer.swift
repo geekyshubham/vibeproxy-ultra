@@ -33,6 +33,25 @@ enum ConfigComposer {
         }
         return mergedRoot
     }
+
+    /// CLIProxyAPI returns HTTP 404 for all `/v0/management/*` routes when secret-key is empty.
+    /// Always inject a plaintext key (CLIProxy bcrypt-hashes it on load). We rewrite
+    /// merged-config on every start, so a known plaintext default is intentional.
+    static func ensureManagementSecretKey(in root: inout [String: Any], plaintextKey: String) {
+        let key = plaintextKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        var remote = root["remote-management"] as? [String: Any] ?? [:]
+        remote["secret-key"] = key
+        // A globally-known default key must never guard a network-exposed API:
+        // force allow-remote off when the shared default is in use, regardless of
+        // user config. A user who wants remote access must set a unique key.
+        if key == ManagementCredentials.defaultSecretKey {
+            remote["allow-remote"] = false
+        } else if remote["allow-remote"] == nil {
+            remote["allow-remote"] = false
+        }
+        root["remote-management"] = remote
+    }
     
     static func parseCustomProviders(
         from root: [String: Any],

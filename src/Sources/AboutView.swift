@@ -71,6 +71,19 @@ struct AboutView: View {
                 .resizable()
                 .frame(width: 64, height: 64)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        } else if let glyph = IconCatalog.shared.image(named: "glyph.png", resizedTo: NSSize(width: 36, height: 36)) {
+            // Stay on-brand even if the app icon is unavailable: the rocket glyph
+            // on the accent chip, matching the web BrandMark and menu bar mark.
+            Image(nsImage: glyph)
+                .foregroundStyle(.white)
+                .frame(width: 64, height: 64)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(LinearGradient(
+                            colors: [MenuBarDesign.accent, MenuBarDesign.accent.opacity(0.82)],
+                            startPoint: .top, endPoint: .bottom
+                        ))
+                )
         } else {
             Image(systemName: "network")
                 .font(.system(size: 36, weight: .semibold))

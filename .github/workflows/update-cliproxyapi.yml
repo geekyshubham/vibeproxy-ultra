@@ -1,8 +1,12 @@
 name: Update CLIProxyAPI
 
+# NOTE: The scheduled trigger is intentionally disabled. This workflow downloads
+# the STOCK upstream binary, which ships the upstream management panel — NOT our
+# custom UI. VibeProxy now builds cli-proxy-api-plus from the vendored fork in
+# third_party/CLIProxyAPI (management-ui embedded via go:embed). Pulling in a new
+# upstream version is a MANUAL step: re-vendor the patched fork and rebuild, so
+# our UI + fixes are preserved. Kept dispatch-only for reference/emergencies.
 on:
-  schedule:
-    - cron: '0 */12 * * *' # Runs every 12 hours (00:00 and 12:00 UTC)
   workflow_dispatch:
 
 permissions:

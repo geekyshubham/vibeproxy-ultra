@@ -114,17 +114,24 @@ struct MenuBarPanelView: View {
                 // Use String(port) so SwiftUI LocalizedStringKey does not locale-format
                 // the integer (e.g. "8,337" instead of "8337").
                 if serverManager.isRunning {
-                    HStack(spacing: 5) {
-                        Text("Proxy live")
-                            .foregroundStyle(MenuBarDesign.success)
-                        Text("·").foregroundStyle(.tertiary)
-                        Text("port \(String(proxyPort))")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
+                    Button(action: onOpenDashboard) {
+                        HStack(spacing: 5) {
+                            Text("Proxy live")
+                                .foregroundStyle(MenuBarDesign.success)
+                            Text("·").foregroundStyle(.tertiary)
+                            Text("localhost:\(String(proxyPort))")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .font(.caption)
                     }
-                    .font(.caption)
+                    .buttonStyle(.plain)
+                    .help("Open management dashboard (lists all proxy models)")
                 } else {
-                    Text("Server stopped")
+                    Text("Server stopped — tap Start below")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -322,6 +329,7 @@ struct MenuBarPanelView: View {
 
     private var footer: some View {
         HStack(spacing: DS.Space.sm) {
+            // Keep text on Start/Stop only — everything else is icon-only.
             Button(action: onToggleServer) {
                 Label(serverManager.isRunning ? "Stop" : "Start",
                       systemImage: serverManager.isRunning ? "stop.fill" : "play.fill")
@@ -331,18 +339,25 @@ struct MenuBarPanelView: View {
             ))
             .help(serverManager.isRunning ? "Stop the local proxy" : "Start the local proxy")
 
-            Button(action: onOpenSettings) {
-                Label("Settings", systemImage: "gearshape.fill")
+            Button(action: onOpenDashboard) {
+                Image(systemName: "safari")
             }
-            .buttonStyle(SoftActionButtonStyle())
+            .buttonStyle(IconActionButtonStyle())
+            .disabled(!serverManager.isRunning)
+            .help("Open management UI at \(ManagementCredentials.backendBaseURL)/management.html (key copied)")
+
+            Button(action: onOpenSettings) {
+                Image(systemName: "gearshape.fill")
+            }
+            .buttonStyle(IconActionButtonStyle())
             .help("Open settings")
 
             Button(action: onCopyURL) {
-                Label("Copy", systemImage: "doc.on.doc")
+                Image(systemName: "doc.on.doc")
             }
-            .buttonStyle(SoftActionButtonStyle())
+            .buttonStyle(IconActionButtonStyle())
             .disabled(!serverManager.isRunning)
-            .help("Copy the proxy URL to the clipboard")
+            .help("Copy proxy URL (http://localhost:\(proxyPort))")
 
             Spacer(minLength: 0)
 

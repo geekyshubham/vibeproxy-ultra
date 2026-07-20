@@ -216,8 +216,9 @@ final class MenuBarPopoverController: NSObject, NSPopoverDelegate {
     }
 
     private func openDashboard() {
-        if let url = URL(string: "http://localhost:8318/management.html") {
-            NSWorkspace.shared.open(url)
-        }
+        // Management key for /management.html login (empty key disables the API with 404).
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(ManagementCredentials.secretKey, forType: .string)
+        NSWorkspace.shared.open(ManagementCredentials.managementHTMLURL)
     }
 }
