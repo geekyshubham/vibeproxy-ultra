@@ -12,12 +12,18 @@ on:
 
 permissions:
   contents: read
-  security-events: write
-  actions: read
 
 jobs:
   guardianbot-security-gate:
     name: guardianbot/security-gate
-    uses: Geekyshubham/guardianbot/.github/workflows/reusable-security.yml@441ca4877d0a934f2a076971e4b2a6763093be67
+    if: github.event_name != 'schedule' || github.event.schedule == '23 2 * * *'
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      id-token: write
+    uses: Geekyshubham/guardianbot/.github/workflows/reusable-security.yml@24167b17e2a7f25f3edb252ab389e178b4392cfe
     with:
       config-path: .guardianbot/config.yml
+
+
