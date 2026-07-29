@@ -161,6 +161,60 @@ final class CodexSeatSwitchTests: XCTestCase {
         XCTAssertEqual(preferred, "team")
     }
 
+    // MARK: - Active session match (two Team users must not both show Active)
+
+    func testSameTeamDifferentEmailsOnlyNativeLoginIsCurrent() {
+        let teamID = teamAccountID
+        let identity = NativeSessionIdentity(
+            email: "shubhamt@olap.site",
+            accountID: teamID,
+            plan: "team"
+        )
+        // Native login: same seat + same email → current
+        XCTAssertTrue(
+            NativeSessionManager.matchesSession(
+                accountType: .codex,
+                accountEmail: "shubhamt@olap.site",
+                accountSeatID: teamID,
+                identity: identity
+            )
+        )
+        // Other user on same Team org (shared chatgpt_account_id) → NOT current
+        XCTAssertFalse(
+            NativeSessionManager.matchesSession(
+                accountType: .codex,
+                accountEmail: "shuham@olap.site",
+                accountSeatID: teamID,
+                identity: identity
+            )
+        )
+    }
+
+    func testSameEmailDifferentSeatsOnlyMatchingSeatIsCurrent() {
+        let identity = NativeSessionIdentity(
+            email: "user@example.com",
+            accountID: teamAccountID,
+            plan: "team"
+        )
+        XCTAssertTrue(
+            NativeSessionManager.matchesSession(
+                accountType: .codex,
+                accountEmail: "user@example.com",
+                accountSeatID: teamAccountID,
+                identity: identity
+            )
+        )
+        XCTAssertFalse(
+            NativeSessionManager.matchesSession(
+                accountType: .codex,
+                accountEmail: "user@example.com",
+                accountSeatID: goAccountID,
+                identity: identity
+            ),
+            "Go seat must not show Active when native Codex is on Team"
+        )
+    }
+
     // MARK: - Auth identity (UI must not collapse Go + Team by email)
 
     func testCodexIdentityKeyIncludesAccountID() throws {

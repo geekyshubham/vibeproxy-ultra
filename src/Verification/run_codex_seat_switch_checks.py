@@ -136,6 +136,41 @@ def main() -> int:
         identity(EMAIL, GO_ID) != identity(EMAIL, TEAM_ID),
     )
 
+    # Native "Active" match: seat id alone must not mark two Team users current.
+    # Mirrors NativeSessionManager.matchesSession (email + seat for Codex).
+    def matches_session(
+        account_email: str | None,
+        account_seat: str | None,
+        identity_email: str | None,
+        identity_seat: str | None,
+    ) -> bool:
+        seat_match = (
+            bool(account_seat)
+            and bool(identity_seat)
+            and account_seat.lower() == identity_seat.lower()
+        )
+        email_match = None
+        if account_email and identity_email:
+            email_match = account_email.lower() == identity_email.lower()
+        if seat_match:
+            if email_match is not None:
+                return email_match
+            return True
+        if account_seat and identity_seat:
+            return False
+        return email_match is True
+
+    check(
+        "same Team different emails: only native login is Active",
+        matches_session("shubhamt@olap.site", TEAM_ID, "shubhamt@olap.site", TEAM_ID)
+        and not matches_session("shuham@olap.site", TEAM_ID, "shubhamt@olap.site", TEAM_ID),
+    )
+    check(
+        "same email different seats: only matching seat is Active",
+        matches_session(EMAIL, TEAM_ID, EMAIL, TEAM_ID)
+        and not matches_session(EMAIL, GO_ID, EMAIL, TEAM_ID),
+    )
+
     # Materialize into temp dir from real home sources
     home = Path.home()
     cockpit = home / ".antigravity_cockpit/codex_accounts"

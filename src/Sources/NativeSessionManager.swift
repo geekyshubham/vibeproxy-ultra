@@ -158,22 +158,55 @@ final class NativeSessionManager: ObservableObject {
     }
 
     private func matches(_ account: AuthAccount, _ identity: NativeSessionIdentity) -> Bool {
-        // Codex: seat id is authoritative. Email alone must NOT mark every Go/Team row current.
-        if account.type == .codex {
-            let fileID = codexAccountID(from: account)
-            if let identityID = identity.accountID?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !identityID.isEmpty,
-               let fileID,
-               fileID.caseInsensitiveCompare(identityID) == .orderedSame
-            {
+        Self.matchesSession(
+            accountType: account.type,
+            accountEmail: account.email,
+            accountSeatID: codexAccountID(from: account),
+            identity: identity
+        )
+    }
+
+    /// Pure session match used by detection + tests.
+    ///
+    /// Codex: seat id distinguishes Go vs Team for one login. Email distinguishes two
+    /// people on the same Team org (shared `chatgpt_account_id`) — without email, both
+    /// would show as the "Active" native session.
+    static func matchesSession(
+        accountType: ServiceType,
+        accountEmail: String?,
+        accountSeatID: String?,
+        identity: NativeSessionIdentity
+    ) -> Bool {
+        if accountType == .codex {
+            let fileID = accountSeatID?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            let identityID = identity.accountID?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            let seatMatch: Bool = {
+                guard let fileID, let identityID else { return false }
+                return fileID.caseInsensitiveCompare(identityID) == .orderedSame
+            }()
+
+            let emailMatch: Bool? = {
+                guard let email = accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                      !email.isEmpty,
+                      let other = identity.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                      !other.isEmpty
+                else { return nil }
+                return email == other
+            }()
+
+            if seatMatch {
+                // Same org seat: only the native login email is "current".
+                if let emailMatch { return emailMatch }
                 return true
             }
-            // No seat id on either side — fall through to email.
-            if fileID != nil, identity.accountID != nil {
+            // Different seats (seat known on both sides) never match by email alone.
+            if fileID != nil, identityID != nil {
                 return false
             }
+            // No seat id on either side — fall through to email.
+            return emailMatch == true
         }
-        if let email = account.email?.lowercased(),
+        if let email = accountEmail?.lowercased(),
            let other = identity.email?.lowercased(),
            email == other
         {
@@ -250,11 +283,21 @@ final class NativeSessionManager: ObservableObject {
         if let writeError { return .failure(message: writeError) }
 
         // Update live identity from disk immediately (full account list refresh follows via UI).
+        // Drop prior "current" markers for this provider's filenames so a sibling Team login
+        // does not keep showing Active for a frame after switch.
         if let identity = detectIdentity(for: type) {
             currentByProvider[type] = identity
-            if matches(account, identity) {
-                currentAccountIDs.insert(account.id)
+            let prefix = type.rawValue.lowercased()
+            var next = currentAccountIDs.filter { id in
+                let lower = id.lowercased()
+                if lower.hasPrefix(prefix) { return false }
+                if type == .codex, lower.hasPrefix("codex-seat") { return false }
+                return true
             }
+            if matches(account, identity) {
+                next.insert(account.id)
+            }
+            currentAccountIDs = next
         }
 
         let targetName = subscriptionLabel?.nilIfEmpty

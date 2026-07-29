@@ -4,6 +4,16 @@ All notable changes to **VibeProxy Ultra** are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] - 2026-07-29
+
+### Fixed
+- **Dual “Active” on ChatGPT Team** — Two different users on the same Team org share one `chatgpt_account_id`. Only the login that matches the native Codex session email is marked **Active** now (seat id alone was enough before).
+- **Management UI / icons** — Ship the custom management UI in release builds (embedded in `cli-proxy-api-plus`); branded favicon, icon consistency, and reviewed UI wiring bugs.
+
+### Changed
+- Release builds compile `cli-proxy-api-plus` from the vendored fork with the custom UI instead of downloading stock upstream.
+- Version **1.2.4**.
+
 ## [1.2.3] - 2026-07-14
 
 ### Fixed
@@ -122,6 +132,7 @@ Initial VibeProxy Ultra release — usage limits, account import, session reliab
 - Analytics accuracy (Codex deltas, model name validation, Gemini/Antigravity double-count)
 - False session expiry when refresh token remains valid
 
+[1.2.4]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.4
 [1.2.3]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.3
 [1.2.2]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.2
 [1.2.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.1
