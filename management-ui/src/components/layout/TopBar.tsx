@@ -1,15 +1,17 @@
 /* ============================================================================
    TopBar — sticky brand + status header (.topbar). Shows the VibeProxy glyph
-   mark, the console title, the live backend host, and a logout control.
+   mark, the console title, the live backend host, the usage date picker, and a
+   logout control.
    ========================================================================== */
 import { useAuth } from '../../context/AuthContext';
 import { useOnline } from '../../context/OnlineContext';
 import { hostLabel } from '../../lib/apiClient';
 import { BrandMark } from '../BrandMark';
+import UsageDayPicker from '../UsageDayPicker';
 import Icon from '../../lib/icons';
 
 export default function TopBar() {
-  const { logout } = useAuth();
+  const { logout, authRequired } = useAuth();
   const { online } = useOnline();
 
   return (
@@ -27,10 +29,15 @@ export default function TopBar() {
         </div>
       </div>
       <div className="grow" />
-      <button className="btn btn-soft btn-sm" onClick={logout} title="Sign out">
-        <Icon.Lock />
-        <span>Lock</span>
-      </button>
+      <UsageDayPicker />
+      {/* With auth disabled there is no key to sign back in with, so offering
+          "Lock" would strand the user at a gate they cannot pass. */}
+      {authRequired && (
+        <button className="btn btn-soft btn-sm" onClick={logout} title="Sign out">
+          <Icon.Lock />
+          <span>Lock</span>
+        </button>
+      )}
     </header>
   );
 }

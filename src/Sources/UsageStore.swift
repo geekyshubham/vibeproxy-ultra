@@ -5,6 +5,12 @@ final class UsageStore: ObservableObject {
     @Published private(set) var costByProvider: [String: ProviderCostSnapshot] = [:]
     @Published private(set) var providerStatuses: [ProviderStatusSnapshot] = []
     @Published private(set) var analytics: AnalyticsOverview?
+    /// Day currently shown by the date pickers. Defaults to today.
+    @Published private(set) var selectedDay: UsageDayKey = UsageDayKey(date: Date())
+    /// Usage for `selectedDay`, read from the persisted day store.
+    @Published private(set) var dailySummary: DailyUsageSummary = .empty(day: UsageDayKey(date: Date()))
+    /// Days that hold at least one usage row, most recent first.
+    @Published private(set) var daysWithUsage: [UsageDayKey] = []
     @Published private(set) var isRefreshing = false
     @Published private(set) var isRefreshingStatus = false
     @Published private(set) var lastRefreshAt: Date?
@@ -257,17 +263,30 @@ final class UsageStore: ObservableObject {
                 // Keep list-prices current (daily TTL; no-op when fresh or disabled) before pricing the scan.
                 await RemotePricingCatalog.refreshIfStale()
                 let historyDays = await MainActor.run { AppSettings.shared.analyticsHistoryDays }
-                let allCosts = await Task.detached(priority: .utility) {
-                    LocalTokenCostScanner.allProviderSnapshots(historyDays: historyDays)
+                // Roll-ups and per-day detail come from the same detached pass. The second
+                // call re-walks the same trees but hits LocalTokenCostScanner's per-file
+                // cache (keyed by path+mtime+size), so it re-parses nothing — only the
+                // directory enumeration repeats.
+                let scan = await Task.detached(priority: .utility) {
+                    (
+                        costs: LocalTokenCostScanner.allProviderSnapshots(historyDays: historyDays),
+                        daily: LocalTokenCostScanner.allProviderDailyUsage(historyDays: historyDays)
+                    )
                 }.value
                 guard !Task.isCancelled else { return }
+
+                // Persist per-day history before publishing, so a day stays queryable long
+                // after its log files age past the scanner's mtime cutoff.
+                UsageDailyStore.record(providers: scan.daily)
+
                 await MainActor.run {
                     guard generation == self.refreshGeneration else { return }
-                    for cost in allCosts {
+                    for cost in scan.costs {
                         self.costByProvider[cost.providerID] = cost
                     }
                     self.analytics = AnalyticsEngine.overview(from: Array(self.costByProvider.values))
                     self.lastCostScanAt = Date()
+                    self.refreshDailySummary()
                 }
             }
 
@@ -295,6 +314,37 @@ final class UsageStore: ObservableObject {
         return costByProvider[id]
     }
 
+    // MARK: - Usage by date
+
+    /// Point both date pickers at a different day and republish its summary.
+    @MainActor
+    func selectDay(_ day: UsageDayKey) {
+        selectedDay = day
+        refreshDailySummary()
+    }
+
+    @MainActor
+    func selectDay(date: Date) {
+        selectDay(UsageDayKey(date: date))
+    }
+
+    /// Re-read the selected day from the persisted store. Cheap (locked dictionary
+    /// lookup) — the expensive scan already happened.
+    @MainActor
+    func refreshDailySummary() {
+        dailySummary = UsageDailyStore.summary(for: selectedDay)
+        daysWithUsage = UsageDailyStore.availableDays()
+    }
+
+    /// Oldest day with recorded usage, for clamping the picker's range. Nil when the
+    /// store is still empty, in which case callers should fall back to today.
+    var earliestDayWithUsage: UsageDayKey? {
+        daysWithUsage.last
+    }
+
+    /// Clears the in-memory live snapshots. Deliberately does NOT touch the persisted
+    /// day history — that is accumulated data the user expects to survive a refresh,
+    /// not a cache of the current session.
     func clearCachedUsage() {
         usageByAccountID = [:]
         costByProvider = [:]

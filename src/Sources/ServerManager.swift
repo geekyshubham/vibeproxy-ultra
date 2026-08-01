@@ -784,6 +784,20 @@ class ServerManager: ObservableObject {
         requestConfigUpdate()
     }
 
+    /// Re-compose the config after the management-console password preference changes.
+    ///
+    /// `AppSettings.requireManagementPassword` is read at compose time and baked into the
+    /// merged config as `remote-management.disable-auth`. That file is only rewritten
+    /// during a config update, so without this the user would flip the switch in Settings
+    /// and still meet the old gate. Callers set the preference first (the SwiftUI binding
+    /// does), then call this.
+    func applyManagementAuthChange() {
+        addLog(AppSettings.shared.requireManagementPassword
+            ? "✓ Management console now requires a password"
+            : "⚠️ Management console password disabled (local access only)")
+        requestConfigUpdate()
+    }
+
     func handleObservedConfigInputsChanged() {
         guard markObservedConfigInputsChanged() else {
             return
@@ -942,9 +956,11 @@ class ServerManager: ObservableObject {
         }
 
         // Management UI requires a non-empty secret-key; empty → 404 "Management API not found".
+        // The console is loopback-only, so the password gate is opt-in (Settings).
         ConfigComposer.ensureManagementSecretKey(
             in: &mergedRoot,
-            plaintextKey: ManagementCredentials.secretKey
+            plaintextKey: ManagementCredentials.secretKey,
+            requireAuth: AppSettings.shared.requireManagementPassword
         )
 
         do {

@@ -52,6 +52,21 @@ final class AppSettings: ObservableObject {
         didSet { persist(menuBarUsageBadge, forKey: Keys.menuBarUsageBadge) }
     }
 
+    // MARK: Management console
+
+    /// Require a password to open the management console.
+    ///
+    /// Off by default: the console binds to loopback, so a login prompt on a
+    /// single-user machine adds friction without adding protection. Turning this on
+    /// restores the password gate (useful on a shared Mac).
+    ///
+    /// Either way the server refuses non-local management requests while auth is off,
+    /// so this can never publish API keys or linked accounts over a tunnel — see
+    /// `AuthenticateManagementKey` in the Go handler.
+    @Published var requireManagementPassword: Bool {
+        didSet { persist(requireManagementPassword, forKey: Keys.requireManagementPassword) }
+    }
+
     // MARK: Account switching
 
     /// Quit + relaunch the associated desktop app after switching accounts.
@@ -101,6 +116,8 @@ final class AppSettings: ObservableObject {
         showAnalyticsTab = defaults.bool(forKey: Keys.showAnalyticsTab, default: true)
         autoUpdatePricing = defaults.bool(forKey: Keys.autoUpdatePricing, default: true)
         menuBarUsageBadge = defaults.bool(forKey: Keys.menuBarUsageBadge, default: false)
+        // Default off: no login page unless the user asks for one.
+        requireManagementPassword = defaults.bool(forKey: Keys.requireManagementPassword, default: false)
         restartAppOnSwitch = defaults.bool(forKey: Keys.restartAppOnSwitch, default: true)
         confirmBeforeSwitch = defaults.bool(forKey: Keys.confirmBeforeSwitch, default: true)
         autoWakeEnabled = defaults.bool(forKey: Keys.autoWakeEnabled, default: false)
@@ -129,6 +146,7 @@ final class AppSettings: ObservableObject {
         static let showAnalyticsTab = "ultra.showAnalyticsTab"
         static let autoUpdatePricing = "ultra.autoUpdatePricing"
         static let menuBarUsageBadge = "ultra.menuBarUsageBadge"
+        static let requireManagementPassword = "ultra.requireManagementPassword"
         static let restartAppOnSwitch = "ultra.restartAppOnSwitch"
         static let confirmBeforeSwitch = "ultra.confirmBeforeSwitch"
         static let autoWakeEnabled = "ultra.autoWakeEnabled"

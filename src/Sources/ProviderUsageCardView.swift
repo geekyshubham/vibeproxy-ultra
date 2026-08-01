@@ -349,19 +349,7 @@ struct ProviderUsageCardView: View {
     }
 
     private func formatVolume(_ count: Int, unit: UsageVolumeUnit) -> String {
-        switch unit {
-        case .credits:
-            let credits = Double(count) / 1000.0
-            if credits >= 1000 { return String(format: "%.1fK cr", credits / 1000) }
-            if credits >= 10 { return String(format: "%.0f cr", credits) }
-            if credits >= 1 { return String(format: "%.1f cr", credits) }
-            if credits > 0 { return String(format: "%.2f cr", credits) }
-            return "0 cr"
-        case .estimatedTokens:
-            return formatTokens(count) + " est"
-        case .tokens:
-            return formatTokens(count)
-        }
+        UsageNumberFormatter.volume(count, unit: unit)
     }
 
     // MARK: - Helpers
@@ -402,14 +390,11 @@ struct ProviderUsageCardView: View {
     }
 
     private func formatTokens(_ count: Int) -> String {
-        if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000) }
-        if count >= 1_000 { return String(format: "%.1fK", Double(count) / 1_000) }
-        return "\(count)"
+        UsageNumberFormatter.tokens(count)
     }
 
     private func formatUSD(_ value: Double) -> String {
-        if value > 0, value < 0.01 { return "<$0.01" }
-        return String(format: "$%.2f", value)
+        UsageNumberFormatter.usd(value)
     }
 
     private func iconImage(for type: ServiceType) -> NSImage? {

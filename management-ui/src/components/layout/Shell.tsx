@@ -7,17 +7,22 @@ import TopBar from './TopBar';
 import TabBar from './TabBar';
 import OfflineBanner from './OfflineBanner';
 import { useOnline } from '../../context/OnlineContext';
+import { UsageDayProvider } from '../../context/UsageDayContext';
 
 export default function Shell() {
   const { online } = useOnline();
   return (
-    <div className="shell">
-      <TopBar />
-      <TabBar />
-      {!online && <OfflineBanner />}
-      <main className="tabpanel" role="tabpanel">
-        <Outlet />
-      </main>
-    </div>
+    // UsageDayProvider spans both the TopBar (which holds the date picker) and the
+    // routed tab (which renders that day's breakdown), so the two stay in sync.
+    <UsageDayProvider>
+      <div className="shell">
+        <TopBar />
+        <TabBar />
+        {!online && <OfflineBanner />}
+        <main className="tabpanel" role="tabpanel">
+          <Outlet />
+        </main>
+      </div>
+    </UsageDayProvider>
   );
 }

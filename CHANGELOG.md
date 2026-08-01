@@ -4,6 +4,36 @@ All notable changes to **VibeProxy Ultra** are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-08-02
+
+Usage by date, everywhere numbers are shown.
+
+### Added
+- **"What did I use on this day?"** — A date picker in the menu bar **Overview** and in the management console top bar, backed by one shared data layer. Pick a day to see that day's tokens, estimated API $, request count, the provider you leaned on most (as a share of spend), and the per-model breakdown.
+- **Persisted day history** — Daily totals accumulate in `~/Library/Application Support/VibeProxy/usage-daily.json` (atomic writes, 400-day retention), so history outlives a restart and survives session logs aging out of the scan window. Each scan **replaces** a day's totals per provider rather than adding to them, so refreshing never inflates today.
+- **Honest day attribution** — Every provider the Overview counts also appears in the by-date view, so the two can't disagree about a day. Where the per-day figure is weaker, it says so instead of being dropped or dressed up as exact: Copilot reports real day totals but can't name the answering model, and Grok pins a whole session's estimate to its last-active day. OpenCode is read per-turn rather than from its cumulative session row, so a session resumed across several days no longer lands entirely on one.
+- **Optional management password** — New Settings toggle, **off by default**: the console is a loopback tool, so a login prompt on a single-user Mac adds friction without adding protection. Turning it on restores the password gate. While auth is off, the server serves the management API only to callers whose TCP peer address is genuinely loopback, and only to same-origin or loopback browser origins — so the port being reachable off-box is not by itself enough to read your keys. It is still an unauthenticated API for anything already running on your Mac; turn the password on if that matters to you.
+- Management API: `GET /v0/management/usage-daily` (a day's totals and breakdown) and `GET /v0/management/auth-mode`.
+
+### Security
+Both of these were found by an adversarial audit of this release before it shipped, and both were reachable with the default settings.
+- **Forwarded headers could forge a loopback caller** — The management API decided "is this caller local" with gin's `ClientIP()`, which honours `X-Forwarded-For` / `X-Real-IP` from any peer because the engine never declared its trusted proxies. With the new password toggle off, that check was the only gate, so `curl -H 'X-Forwarded-For: 127.0.0.1'` from another machine could read plaintext provider keys and linked accounts. Loopback is now judged solely by the TCP peer address, which a header cannot forge. The 5-strike ban is keyed on it too, so an attacker can no longer rotate a header for unlimited key guesses or poison another caller's ban entry.
+- **Any website could read the management API from your browser** — Every route answered with `Access-Control-Allow-Origin: *`. That was survivable while a management key was required, but with the password off a management request needs no headers at all, making it a CORS-simple request: any page you happened to visit could `fetch('http://127.0.0.1:8318/v0/management/config')` and read your keys out of the response, or issue a write with no preflight. `/v0/management/*` now refuses browser origins that are neither same-origin nor loopback, before the handler runs, and never echoes the wildcard. The inference endpoints keep the open policy — they require a real API key.
+
+### Fixed
+- **Partial days could overwrite complete history** — The per-day scanners filtered log *files* by modification time but not the *days* inside them, so a session file touched today also yielded fragments of days older than the scan window. Since each scan replaces a day's totals per provider, those fragments overwrote complete records that had been saved while the day was current.
+- **Large numbers rendered wrong** — `formatTokens` had been copy-pasted into three views with *divergent* tiers: the analytics dashboard handled billions, but the menu bar panel and provider cards stopped at millions, so a 3.1B-token total displayed as `3100.0M`. Every surface now routes through one formatter that scales both up and down — `950`, `12.4K`, `4.2M`, `3.1B`, `2.5T` — and the same rule applies to costs (`<$0.01`, `$18.40`, `$1.2K`) and Kiro credits.
+- **"Today" button could vanish after midnight** — A console left open overnight captured today's date once, so the button that returns you to today stayed hidden on a now-stale day. It re-arms at each midnight.
+- The same number could round differently in the app and the console (`4.25` → `4.2` vs `4.3`): Swift's `String(format:)` rounds half-to-even, JavaScript's `toFixed` rounds half-away-from-zero. Both now round half away from zero.
+- The console's provider-name table was missing Cursor, CodeBuddy, GitLab and Kilo, and mis-cased unknown providers.
+
+### Changed
+- Kiro plan credits are kept out of token totals throughout (they are stored as millicredits, so summing them would inflate a token count ~1000× per credit). Providers are ranked by **cost**, the only basis comparable across unlike units.
+- Version **1.3.1**.
+
+### Note
+Day history starts accumulating when this version first runs, so dates before that will legitimately read empty.
+
 ## [1.2.4] - 2026-07-29
 
 ### Fixed

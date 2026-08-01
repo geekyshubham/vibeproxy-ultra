@@ -14,7 +14,12 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import apiClient, { AuthError, registerKeyGetter, registerAuthErrorHandler } from '../lib/apiClient';
+import apiClient, {
+  AuthError,
+  NetworkError,
+  registerKeyGetter,
+  registerAuthErrorHandler,
+} from '../lib/apiClient';
 import { useOnline } from './OnlineContext';
 
 const KEY_STORAGE = 'vp_mgmt_key';
@@ -22,6 +27,9 @@ const KEY_STORAGE = 'vp_mgmt_key';
 interface AuthCtx {
   authenticated: boolean;
   booting: boolean;
+  /** False when the backend has auth disabled for this caller, so no key is needed
+   *  and controls like "Lock" are meaningless. */
+  authRequired: boolean;
   key: string;
   login: (key: string) => Promise<void>;
   logout: () => void;
@@ -34,6 +42,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [key, setKey] = useState<string>(() => sessionStorage.getItem(KEY_STORAGE) ?? '');
   const [authenticated, setAuthenticated] = useState(false);
   const [booting, setBooting] = useState(true);
+  // Starts true so the gate is never dropped before the backend confirms it can be.
+  const [authRequired, setAuthRequired] = useState(true);
 
   // Keep a ref so the apiClient getter always sees the latest key.
   const keyRef = useRef(key);
@@ -65,6 +75,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Ask whether a key is needed at all. /auth-mode sits outside the management
+      // auth middleware precisely so this question is answerable without one —
+      // probing an authenticated route with an empty key would count as a failed
+      // attempt and self-ban this IP after five page loads.
+      try {
+        const mode = await apiClient.get<{ authRequired?: boolean }>('/auth-mode');
+        if (cancelled) return;
+        setOnline();
+        if (mode?.authRequired === false) {
+          // Auth is off and we are a local caller: go straight in, no key involved.
+          setAuthRequired(false);
+          setAuthenticated(true);
+          setBooting(false);
+          return;
+        }
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof NetworkError) setOffline();
+        // Fail closed on anything else too (404 on an older backend, 5xx, malformed
+        // body): keep the gate up and fall through to the stored-key path below.
+      }
+
       const stored = sessionStorage.getItem(KEY_STORAGE) ?? '';
       if (!stored) {
         if (!cancelled) setBooting(false);
@@ -116,13 +148,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     registerKeyGetter(() => keyRef.current);
     registerAuthErrorHandler(() => {
-      if (authenticatedRef.current) logout();
+      if (!authenticatedRef.current) return;
+      // A 401/403 here is proof the server wants a key, even if /auth-mode said
+      // otherwise at boot — the setting is togglable at runtime and the server
+      // hot-reloads it. Restoring the gate is what lets the user supply one.
+      setAuthRequired(true);
+      logout();
     });
   }, [logout]);
 
   const value = useMemo(
-    () => ({ authenticated, booting, key, login, logout }),
-    [authenticated, booting, key, login, logout],
+    () => ({ authenticated, booting, authRequired, key, login, logout }),
+    [authenticated, booting, authRequired, key, login, logout],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

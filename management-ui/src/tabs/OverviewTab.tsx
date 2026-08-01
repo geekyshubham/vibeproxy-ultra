@@ -1,7 +1,8 @@
 /* ============================================================================
    OverviewTab — at-a-glance stat tiles: accounts, api-keys, compat providers,
-   logging state. Every collection is normalized via asArray/pluckArray so a
-   null response renders "0" instead of crashing.
+   logging state, plus the usage breakdown for the day selected in the TopBar.
+   Every collection is normalized via asArray/pluckArray so a null response
+   renders "0" instead of crashing.
    ========================================================================== */
 import { useManagementQuery } from '../lib/useManagementQuery';
 import { pluckArray } from '../lib/apiClient';
@@ -9,6 +10,7 @@ import type { AuthFile, BackendConfig, CompatProvider } from '../lib/types';
 import { num } from '../lib/format';
 import Icon from '../lib/icons';
 import LoadingBlock from '../components/LoadingBlock';
+import UsageByDatePanel from '../components/UsageByDatePanel';
 
 interface StatProps {
   Glyph: typeof Icon.Users;
@@ -86,6 +88,8 @@ export default function OverviewTab() {
           subOk={loggingOn}
         />
       </div>
+
+      <UsageByDatePanel />
 
       <div className="glass-panel card">
         <div className="between">

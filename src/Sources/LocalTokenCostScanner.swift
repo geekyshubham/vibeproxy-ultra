@@ -1,23 +1,6 @@
 import Foundation
 
-/// Billing/volume unit for analytics rows. Token-like units may be summed together;
-/// credit units stay separate so Kiro millicredits never inflate "token" totals.
-enum UsageVolumeUnit: String, Equatable {
-    /// Real token counts from CLI session logs.
-    case tokens
-    /// Kiro plan credits stored as millicredits (credits × 1000) for sub-credit precision.
-    case credits
-    /// Rough char/4 (or similar) estimates — still token-like for aggregation.
-    case estimatedTokens
-
-    /// Whether this unit may contribute to global token volume totals.
-    var aggregatesAsTokens: Bool {
-        switch self {
-        case .tokens, .estimatedTokens: return true
-        case .credits: return false
-        }
-    }
-}
+// `UsageVolumeUnit` lives in UsageVolumeUnit.swift.
 
 struct ModelTokenUsage: Equatable, Identifiable {
     var id: String { model }
@@ -117,6 +100,47 @@ enum LocalTokenCostScanner {
 
     static func claudeSnapshot(now: Date = Date(), historyDays: Int = 30) -> ProviderCostSnapshot? {
         snapshot(for: .claude, now: now, historyDays: historyDays)
+    }
+
+    /// Per-day usage for every provider we can attribute to a calendar day.
+    ///
+    /// Coverage matches `allProviderSnapshots`, deliberately: a provider omitted here
+    /// would make the by-date view under-report the very same day the Overview reports
+    /// correctly, which reads as a bug rather than as caution. Providers whose day
+    /// attribution is weaker instead carry an honest `DailyUsageFidelity` and the UI shows
+    /// the caveat — Grok pins a whole session's estimate to its last-activity day, and
+    /// Copilot's transcripts never name the answering model.
+    static func allProviderDailyUsage(
+        now: Date = Date(),
+        historyDays: Int = 30
+    ) -> [[UsageDayKey: DailyProviderUsage]] {
+        var results: [[UsageDayKey: DailyProviderUsage]] = []
+
+        // Per-event timestamps in jsonl trees → exact per-day, per-model attribution.
+        let jsonlTypes: [ServiceType] = [.codex, .claude, .gemini, .antigravity]
+        for type in jsonlTypes {
+            if let daily = dailyUsage(for: type, now: now, historyDays: historyDays), !daily.isEmpty {
+                results.append(daily)
+            }
+        }
+
+        // Specialized aggregators, each reporting its own fidelity:
+        //   Kiro     — per-turn credit metering, exact.
+        //   OpenCode — per-turn `message` rows, exact when they name a model.
+        //   Grok     — whole-session estimate on one day, sessionApproximate.
+        //   Copilot  — real day totals, no model dimension, dayTotalsOnly.
+        // Copilot has no generic-tree fallback here (unlike allProviderSnapshots): the
+        // generic scan buckets by file mtime, which would pin an append-only transcript's
+        // whole history onto the day it was last reopened.
+        let specialized = [
+            LocalKiroCredits.dailyUsage(now: now, historyDays: historyDays),
+            LocalOpenCodeUsage.dailyUsage(now: now, historyDays: historyDays),
+            LocalGrokUsage.dailyUsage(now: now, historyDays: historyDays),
+            LocalCopilotUsage.dailyUsage(now: now, historyDays: historyDays),
+        ]
+        results.append(contentsOf: specialized.filter { !$0.isEmpty })
+
+        return results
     }
 
     /// All providers with local logs we know how to scan.
@@ -247,20 +271,25 @@ enum LocalTokenCostScanner {
 
     // MARK: - Scan
 
-    private static func scan(providerID: String, directories: [URL], now: Date, historyDays: Int) -> AggregateDetail {
+    /// Walks the provider's log trees and returns per-day, per-model buckets within the
+    /// history window: `day-start epoch (local) -> (model -> bucket)`.
+    ///
+    /// Both the rolled-up `scan()` and the date-indexed daily API build on this, so the
+    /// two can never disagree about what a given day contains.
+    private static func scanPerDay(
+        providerID: String,
+        directories: [URL],
+        now: Date,
+        historyDays: Int
+    ) -> [Int: [String: ModelBucket]] {
         let fileManager = FileManager.default
         // CodexBar: rolling window is inclusive — 30-day display starts 29 days before now.
         let lookback = max(0, historyDays - 1)
         let cutoffDate = Calendar.current.date(byAdding: .day, value: -lookback, to: now) ?? now
         let cutoff = Calendar.current.startOfDay(for: cutoffDate)
-        let todayKey = dayKey(for: now)
         let cutoffDay = dayKey(for: cutoff)
 
-        var totalBuckets: [String: ModelBucket] = [:]
-        var sessionTokens = 0
-        var sessionCost = 0.0
-        var historyTokens = 0
-        var historyCost = 0.0
+        var perDay: [Int: [String: ModelBucket]] = [:]
         var seenPaths = Set<String>()
         var liveKeys = Set<String>()
 
@@ -286,6 +315,9 @@ enum LocalTokenCostScanner {
                 let size = values.fileSize ?? 0
 
                 // Skip files last touched before the history window and huge dumps.
+                // NOTE: this is why a fresh scan cannot see arbitrarily far back — a file
+                // untouched since before the window is never opened, so days inside the
+                // window that live in an old file are invisible until persistence accrues.
                 guard modified >= cutoff else { continue }
                 if size > 60_000_000 { continue }
 
@@ -299,31 +331,115 @@ enum LocalTokenCostScanner {
                     cutoff: cutoff
                 )
 
-                // Only count days within the history window; attribute "today" precisely.
+                // Only keep days within the history window.
                 for (day, models) in aggregate.perDayModels where day >= cutoffDay {
-                    let isToday = (day == todayKey)
+                    var dayModels = perDay[day] ?? [:]
                     for (model, bucket) in models {
-                        var merged = totalBuckets[model] ?? ModelBucket()
+                        var merged = dayModels[model] ?? ModelBucket()
                         merged.input += bucket.input
                         merged.output += bucket.output
                         merged.cacheRead += bucket.cacheRead
                         merged.total += bucket.total
                         merged.requests += bucket.requests
                         merged.cost += bucket.cost
-                        totalBuckets[model] = merged
-
-                        historyTokens += bucket.total
-                        historyCost += bucket.cost
-                        if isToday {
-                            sessionTokens += bucket.total
-                            sessionCost += bucket.cost
-                        }
+                        dayModels[model] = merged
                     }
+                    perDay[day] = dayModels
                 }
             }
         }
 
         pruneCache(keeping: liveKeys, roots: directories)
+        return perDay
+    }
+
+    /// Per-day, per-model usage for one provider, keyed by calendar day.
+    /// Returns nil when this provider has no scannable log trees.
+    static func dailyUsage(
+        for serviceType: ServiceType,
+        now: Date = Date(),
+        historyDays: Int = 30
+    ) -> [UsageDayKey: DailyProviderUsage]? {
+        let roots = roots(for: serviceType)
+        guard !roots.directories.isEmpty else { return nil }
+        let perDay = scanPerDay(
+            providerID: roots.providerID,
+            directories: roots.directories,
+            now: now,
+            historyDays: historyDays
+        )
+        return dailyProviderUsage(providerID: roots.providerID, perDay: perDay)
+    }
+
+    /// Converts raw day buckets into the shared date-indexed model.
+    /// These trees carry per-event timestamps, so fidelity is `.exact`.
+    private static func dailyProviderUsage(
+        providerID: String,
+        perDay: [Int: [String: ModelBucket]]
+    ) -> [UsageDayKey: DailyProviderUsage] {
+        var result: [UsageDayKey: DailyProviderUsage] = [:]
+        for (day, models) in perDay {
+            let rows = models
+                .map { model, bucket in
+                    DailyModelUsage(
+                        model: model,
+                        inputTokens: bucket.input,
+                        outputTokens: bucket.output,
+                        cacheReadTokens: bucket.cacheRead,
+                        totalVolume: bucket.total,
+                        estimatedCostUSD: bucket.cost,
+                        requestCount: bucket.requests,
+                        volumeUnit: .tokens
+                    )
+                }
+                .sorted { $0.totalVolume > $1.totalVolume }
+            guard !rows.isEmpty else { continue }
+            result[UsageDayKey(epoch: day)] = DailyProviderUsage(
+                providerID: providerID,
+                models: rows,
+                volumeUnit: .tokens,
+                fidelity: .exact
+            )
+        }
+        return result
+    }
+
+    private static func scan(providerID: String, directories: [URL], now: Date, historyDays: Int) -> AggregateDetail {
+        let perDay = scanPerDay(
+            providerID: providerID,
+            directories: directories,
+            now: now,
+            historyDays: historyDays
+        )
+        let todayKey = dayKey(for: now)
+
+        var totalBuckets: [String: ModelBucket] = [:]
+        var sessionTokens = 0
+        var sessionCost = 0.0
+        var historyTokens = 0
+        var historyCost = 0.0
+
+        // Attribute "today" precisely; everything in the window feeds the rolling total.
+        for (day, models) in perDay {
+            let isToday = (day == todayKey)
+            for (model, bucket) in models {
+                var merged = totalBuckets[model] ?? ModelBucket()
+                merged.input += bucket.input
+                merged.output += bucket.output
+                merged.cacheRead += bucket.cacheRead
+                merged.total += bucket.total
+                merged.requests += bucket.requests
+                merged.cost += bucket.cost
+                totalBuckets[model] = merged
+
+                historyTokens += bucket.total
+                historyCost += bucket.cost
+                if isToday {
+                    sessionTokens += bucket.total
+                    sessionCost += bucket.cost
+                }
+            }
+        }
 
         let models = totalBuckets
             .map { key, bucket in

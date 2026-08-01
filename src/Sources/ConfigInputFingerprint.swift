@@ -56,7 +56,12 @@ enum ConfigInputFingerprint {
             // Cheap fingerprint: size + mtime. Full SHA-256 every second was a CPU hog.
             if let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) {
                 parts.append(String(values.fileSize ?? -1))
-                parts.append(String(Int((values.contentModificationDate ?? .distantPast).timeIntervalSince1970)))
+                // Sub-second precision matters: an edit that keeps the byte count (say
+                // `port: 8317` → `port: 8318`) within the same wall-clock second as the
+                // previous write is otherwise invisible, and stays invisible, because the
+                // fingerprint never changes again until some later write.
+                // String(format:) is unlocalized, so the decimal separator is stable.
+                parts.append(String(format: "%.6f", (values.contentModificationDate ?? .distantPast).timeIntervalSince1970))
             } else {
                 parts.append("<unreadable>")
             }

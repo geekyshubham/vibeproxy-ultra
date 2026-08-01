@@ -66,6 +66,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         // Load cached model prices immediately and refresh the live feed (models.dev) in the
         // background, so cost estimates track real pricing rather than a frozen table.
         RemotePricingCatalog.bootstrap()
+        // Load persisted per-day usage before the first scan, so the date pickers can show
+        // history immediately instead of looking empty until a scan lands.
+        UsageDailyStore.bootstrap()
+        usageStore.refreshDailySummary()
         usageStore.startAutoRefresh()
         // Keep OAuth access tokens fresh (refresh ~15 minutes before expiry).
         TokenRefreshService.startAutoRefresh()

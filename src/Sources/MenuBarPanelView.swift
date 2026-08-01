@@ -197,6 +197,10 @@ struct MenuBarPanelView: View {
             overviewPulse(analytics)
         }
 
+        // "How much did I use on <date>" — reads the persisted day store, so changing
+        // dates is a lookup rather than a rescan.
+        UsageByDateView(usageStore: usageStore, compact: true)
+
         if visibleProviders.allSatisfy({ authManager.accounts(for: $0).isEmpty }) {
             emptyState
         }
@@ -252,7 +256,7 @@ struct MenuBarPanelView: View {
             pulseStat(
                 icon: "dollarsign.circle",
                 label: "Est. API $",
-                value: String(format: "$%.2f", analytics.totalCostUSD30d),
+                value: UsageNumberFormatter.usd(analytics.totalCostUSD30d),
                 valueColor: MenuBarDesign.accent
             )
             if let top = analytics.topModels.first {
@@ -380,8 +384,6 @@ struct MenuBarPanelView: View {
     }
 
     private func formatTokens(_ count: Int) -> String {
-        if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000) }
-        if count >= 1_000 { return String(format: "%.1fK", Double(count) / 1_000) }
-        return "\(count)"
+        UsageNumberFormatter.tokens(count)
     }
 }

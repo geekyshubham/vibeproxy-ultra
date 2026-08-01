@@ -752,6 +752,22 @@ struct SettingsView: View {
                             NSPasteboard.general.setString(ManagementCredentials.secretKey, forType: .string)
                         }
                     }
+
+                    Toggle("Require password for management console", isOn: $settings.requireManagementPassword)
+                        // The preference is baked into the merged config at compose
+                        // time, so it has to be re-composed for the change to land.
+                        .onChange(of: settings.requireManagementPassword) { _ in
+                            serverManager.applyManagementAuthChange()
+                        }
+
+                    Text(
+                        settings.requireManagementPassword
+                            ? "The console asks for the management key above before opening."
+                            : "The console opens without a password. Requests from other machines are refused either way, so your API keys and linked accounts are never exposed off this Mac."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
 
                 CLIHarnessSettingsSection(proxyPort: 8317)

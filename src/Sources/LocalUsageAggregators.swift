@@ -100,6 +100,56 @@ enum LocalKiroCredits {
         )
     }
 
+    /// Per-day, per-model credit usage for the date-indexed views.
+    ///
+    /// Fidelity is `.exact`: `metering_usage` carries per-turn credits with a real
+    /// timestamp, so a day's figure is genuinely that day's spend — not a session total
+    /// pinned to one date.
+    static func dailyUsage(
+        now: Date = Date(),
+        historyDays: Int = 30,
+        usdPerCredit: Double = TokenPricingCatalog.kiroUSDPerCredit
+    ) -> [UsageDayKey: DailyProviderUsage] {
+        let cutoffStart = analyticsCutoffStart(now: now, historyDays: historyDays)
+        let byDay = detailedByDay(now: now, cutoffStart: cutoffStart)
+        let cutoffDay = dayKey(for: cutoffStart)
+
+        var result: [UsageDayKey: DailyProviderUsage] = [:]
+        // Out-of-window days must be dropped, not merely ignored. `detailedByDay` filters
+        // *files* by mtime, so a session touched today still yields turns from before the
+        // window — but only from the files that happened to be touched, making such a day's
+        // figure partial. UsageDailyStore.record replaces per (day, provider), so writing a
+        // partial old day would overwrite the complete record persisted while it was current.
+        for (day, models) in byDay where day >= cutoffDay {
+            let rows = models.compactMap { model, bucket -> DailyModelUsage? in
+                guard bucket.credits > 0 || bucket.requests > 0 else { return nil }
+                // Millicredits keep sub-credit precision; .credits keeps them out of token totals.
+                let milli = Int((bucket.credits * 1000).rounded())
+                let displayModel = TokenPricingCatalog.normalizeModelID(model) ?? model
+                return DailyModelUsage(
+                    model: displayModel,
+                    inputTokens: milli,
+                    outputTokens: 0,
+                    cacheReadTokens: 0,
+                    totalVolume: milli,
+                    estimatedCostUSD: max(0, bucket.credits) * usdPerCredit,
+                    requestCount: bucket.requests,
+                    volumeUnit: .credits
+                )
+            }
+            .sorted { $0.totalVolume > $1.totalVolume }
+
+            guard !rows.isEmpty else { continue }
+            result[UsageDayKey(epoch: day)] = DailyProviderUsage(
+                providerID: "kiro",
+                models: rows,
+                volumeUnit: .credits,
+                fidelity: .exact
+            )
+        }
+        return result
+    }
+
     private static func creditByDay(now: Date, cutoffStart: Date) -> [Int: Double] {
         detailedByDay(now: now, cutoffStart: cutoffStart).mapValues { models in
             models.values.reduce(0) { $0 + $1.credits }
@@ -339,6 +389,88 @@ enum LocalGrokUsage {
         )
     }
 
+    /// Per-day usage for the date-indexed views.
+    ///
+    /// Fidelity is `.sessionApproximate`, and that is not a formality: `parseSignals`
+    /// estimates a whole session's tokens from its final context occupancy and turn count,
+    /// then pins the entire figure to the session's last-activity day. A session spanning
+    /// Monday to Wednesday therefore reports all of its volume on Wednesday. The per-model
+    /// split is real (one model per session), so only the day attribution is approximate.
+    ///
+    /// Walks the same tree as `costSnapshot` and hits the same per-file cache, so the
+    /// second pass re-parses nothing.
+    static func dailyUsage(
+        now: Date = Date(),
+        historyDays: Int = 30
+    ) -> [UsageDayKey: DailyProviderUsage] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let root = home.appendingPathComponent(".grok/sessions")
+        guard FileManager.default.fileExists(atPath: root.path) else { return [:] }
+
+        let cutoff = analyticsCutoffStart(now: now, historyDays: historyDays)
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [:] }
+
+        let cutoffDay = dayKey(for: cutoff)
+        var perDay: [Int: [String: ModelBucket]] = [:]
+        for case let url as URL in enumerator {
+            guard url.lastPathComponent == "signals.json" else { continue }
+            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { continue }
+            let mtime = values.contentModificationDate ?? .distantPast
+            let activity = sessionActivityDate(sessionDir: url.deletingLastPathComponent()) ?? mtime
+            guard activity >= cutoff || mtime >= cutoff else { continue }
+            let size = values.fileSize ?? 0
+            let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+
+            let parsed = parseSignals(path: path, url: url, mtime: mtime, activity: activity, size: size)
+            guard parsed.tokens > 0 else { continue }
+
+            // Drop days older than the window: the `mtime >= cutoff` branch above admits a
+            // file whose activity day is out of window, and a partial old day would
+            // overwrite the complete persisted one (see the note in Kiro's dailyUsage).
+            guard parsed.day >= cutoffDay else { continue }
+
+            var dayMap = perDay[parsed.day] ?? [:]
+            var bucket = dayMap[parsed.model] ?? ModelBucket()
+            // signals.json carries no in/out split; costSnapshot files the whole estimate
+            // under input, and this must agree with it or the two views would disagree.
+            bucket.total += parsed.tokens
+            bucket.input += parsed.tokens
+            bucket.cost += parsed.cost
+            bucket.requests += parsed.requests
+            dayMap[parsed.model] = bucket
+            perDay[parsed.day] = dayMap
+        }
+
+        var result: [UsageDayKey: DailyProviderUsage] = [:]
+        for (day, models) in perDay {
+            let rows = models.map { model, bucket in
+                DailyModelUsage(
+                    model: model,
+                    inputTokens: bucket.input,
+                    outputTokens: bucket.output,
+                    cacheReadTokens: bucket.cacheRead,
+                    totalVolume: bucket.total,
+                    estimatedCostUSD: bucket.cost,
+                    requestCount: bucket.requests,
+                    volumeUnit: .estimatedTokens
+                )
+            }
+            .sorted { $0.totalVolume > $1.totalVolume }
+            guard !rows.isEmpty else { continue }
+            result[UsageDayKey(epoch: day)] = DailyProviderUsage(
+                providerID: "grok",
+                models: rows,
+                volumeUnit: .estimatedTokens,
+                fidelity: .sessionApproximate
+            )
+        }
+        return result
+    }
+
     private struct ModelBucket {
         var input = 0
         var output = 0
@@ -571,6 +703,164 @@ enum LocalOpenCodeUsage {
         )
     }
 
+    /// Per-day usage for the date-indexed views.
+    ///
+    /// Read from the per-turn `message` table, never the cumulative `session` row: a
+    /// session resumed across several days carries one lifetime total with a single
+    /// `time_updated`, so bucketing that row would dump the whole history onto one day
+    /// (the same trap `openCodeTodayTotals` exists to avoid for "today").
+    ///
+    /// Fidelity is decided per day by what the data actually supports: `.exact` when every
+    /// contributing message named its model, `.dayTotalsOnly` when any did not, since the
+    /// per-model split is then incomplete even though the day total is right. Older DBs
+    /// with no `message` table return nothing rather than a mis-attributed guess.
+    static func dailyUsage(
+        now: Date = Date(),
+        historyDays: Int = 30
+    ) -> [UsageDayKey: DailyProviderUsage] {
+        let candidates = [
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/opencode/opencode.db"),
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".opencode/opencode.db"),
+        ]
+        guard let dbURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            return [:]
+        }
+
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else {
+            return [:]
+        }
+        defer { sqlite3_close(db) }
+
+        // Unit detection mirrors costSnapshot: probe the session table's max, because an
+        // idle DB would otherwise let millisecond values clear a seconds-scaled cutoff.
+        var maxUpdated: Int64 = 0
+        var maxStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT MAX(time_updated) FROM session;", -1, &maxStmt, nil) == SQLITE_OK {
+            if sqlite3_step(maxStmt) == SQLITE_ROW { maxUpdated = sqlite3_column_int64(maxStmt, 0) }
+        }
+        sqlite3_finalize(maxStmt)
+        let scale: Int64 = timeUpdatedIsMilliseconds(maxUpdated) ? 1000 : 1
+
+        let cutoffStart = analyticsCutoffStart(now: now, historyDays: historyDays)
+        let cutoffTs = Int64(cutoffStart.timeIntervalSince1970) * scale
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db,
+            "SELECT time_created, data FROM message WHERE time_created >= ?;",
+            -1,
+            &stmt,
+            nil
+        ) == SQLITE_OK, let stmt else {
+            // No `message` table (older OpenCode): no trustworthy per-day signal exists.
+            return [:]
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, cutoffTs)
+
+        struct Bucket {
+            var input = 0
+            var output = 0
+            var cache = 0
+            var total = 0
+            var cost = 0.0
+            var requests = 0
+        }
+        var perDay: [Int: [String: Bucket]] = [:]
+        var daysMissingModel = Set<Int>()
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let created = sqlite3_column_int64(stmt, 0)
+            guard let c = sqlite3_column_text(stmt, 1),
+                  let data = String(cString: c).data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (json["role"] as? String) == "assistant"
+            else { continue }
+
+            let tk = json["tokens"] as? [String: Any] ?? [:]
+            let cacheBlob = tk["cache"] as? [String: Any] ?? [:]
+            let input = (tk["input"] as? NSNumber)?.intValue ?? 0
+            let output = (tk["output"] as? NSNumber)?.intValue ?? 0
+            let reasoning = (tk["reasoning"] as? NSNumber)?.intValue ?? 0
+            let cacheRead = (cacheBlob["read"] as? NSNumber)?.intValue ?? 0
+            let storedCost = (json["cost"] as? NSNumber)?.doubleValue ?? 0
+
+            let total = input + output + reasoning + cacheRead
+            guard total > 0 || storedCost > 0 else { continue }
+
+            let day = dayKey(forEpoch: created, scale: scale)
+            let named = messageModelID(json)
+            if named == nil { daysMissingModel.insert(day) }
+            let model = named ?? "opencode"
+
+            // Prefer OpenCode's own per-message cost (already model-aware); else list price.
+            let cost = storedCost > 0
+                ? storedCost
+                : TokenPricingCatalog.estimateUSD(
+                    model: model,
+                    inputTokens: input,
+                    outputTokens: output + reasoning,
+                    cacheReadTokens: cacheRead
+                )
+
+            var dayMap = perDay[day] ?? [:]
+            var bucket = dayMap[model] ?? Bucket()
+            bucket.input += input
+            bucket.output += output + reasoning
+            bucket.cache += cacheRead
+            bucket.total += total
+            bucket.cost += cost
+            bucket.requests += 1
+            dayMap[model] = bucket
+            perDay[day] = dayMap
+        }
+
+        var result: [UsageDayKey: DailyProviderUsage] = [:]
+        for (day, models) in perDay {
+            let rows = models.map { name, b in
+                DailyModelUsage(
+                    model: name,
+                    inputTokens: b.input,
+                    outputTokens: b.output,
+                    cacheReadTokens: b.cache,
+                    totalVolume: b.total,
+                    estimatedCostUSD: b.cost,
+                    requestCount: b.requests,
+                    volumeUnit: .tokens
+                )
+            }
+            .sorted { $0.totalVolume > $1.totalVolume }
+            guard !rows.isEmpty else { continue }
+            result[UsageDayKey(epoch: day)] = DailyProviderUsage(
+                providerID: "opencode",
+                models: rows,
+                volumeUnit: .tokens,
+                fidelity: daysMissingModel.contains(day) ? .dayTotalsOnly : .exact
+            )
+        }
+        return result
+    }
+
+    /// Model id from a `message.data` blob, normalised for pricing. Nil when the row does
+    /// not name one, which is what downgrades that day's fidelity rather than inventing a
+    /// model label that looks authoritative.
+    private static func messageModelID(_ json: [String: Any]) -> String? {
+        let raw = (json["modelID"] as? String)
+            ?? (json["modelId"] as? String)
+            ?? (json["model"] as? String)
+        guard let raw, !raw.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let provider = (json["providerID"] as? String) ?? (json["providerId"] as? String) ?? ""
+        let normalized = TokenPricingCatalog.normalizeModelID(raw) ?? raw
+        return provider.isEmpty ? normalized : "\(provider)/\(normalized)"
+    }
+
+    /// Local start-of-day epoch for an OpenCode timestamp in `scale` units per second.
+    private static func dayKey(forEpoch value: Int64, scale: Int64) -> Int {
+        let seconds = TimeInterval(value) / TimeInterval(max(1, scale))
+        return Int(Calendar.current.startOfDay(for: Date(timeIntervalSince1970: seconds)).timeIntervalSince1970)
+    }
+
     /// OpenCode stores model as JSON: `{"id":"glm-5.2","providerID":"opencode-go",...}`
     private static func parseOpenCodeModel(_ raw: String) -> String {
         if let data = raw.data(using: .utf8),
@@ -627,7 +917,7 @@ enum LocalOpenCodeUsage {
 
 enum LocalCopilotUsage {
     private static let cacheLock = NSLock()
-    private static var fileCache: [String: (mtime: Date, size: Int, requests: Int, days: [Int: Int])] = [:]
+    private static var fileCache: [String: (mtime: Date, size: Int, requests: Int, days: [Int: Int], dayRequests: [Int: Int])] = [:]
     /// Skip pathological multi‑MB transcripts (still count via cache once parsed).
     private static let maxFileBytes = 8_000_000
 
@@ -704,19 +994,97 @@ enum LocalCopilotUsage {
         )
     }
 
-    private static func parseFile(path: String, url: URL, mtime: Date, size: Int) -> (requests: Int, days: [Int: Int]) {
+    /// Per-day usage for the date-indexed views.
+    ///
+    /// Fidelity is `.dayTotalsOnly`. The day attribution itself is trustworthy — every
+    /// message is bucketed by its own ISO8601 `timestamp` (see `parseFile`), so an
+    /// append-only transcript reopened today does not retag its history — but Copilot's
+    /// JB transcripts never name the model that answered, so there is no per-model split
+    /// to report. The single row is labelled as an estimate because the token count is
+    /// derived from message text length, not from logged usage.
+    static func dailyUsage(
+        now: Date = Date(),
+        historyDays: Int = 30
+    ) -> [UsageDayKey: DailyProviderUsage] {
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".copilot/jb")
+        guard FileManager.default.fileExists(atPath: root.path) else { return [:] }
+
+        let cutoff = analyticsCutoffStart(now: now, historyDays: historyDays)
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [:] }
+
+        let cutoffDay = dayKey(for: cutoff)
+        var dayTokens: [Int: Int] = [:]
+        var dayRequests: [Int: Int] = [:]
+        for case let url as URL in enumerator {
+            guard url.pathExtension.lowercased() == "jsonl" else { continue }
+            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+                  let mtime = values.contentModificationDate, mtime >= cutoff
+            else { continue }
+            let size = values.fileSize ?? 0
+            guard size > 0, size <= maxFileBytes else { continue }
+
+            let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+            let parsed = parseFile(path: path, url: url, mtime: mtime, size: size)
+            // `mtime >= cutoff` admits the file, but a long-lived transcript also holds
+            // messages from before the window. Those days would be partial here (only
+            // recently-touched files contribute), and a partial day overwrites the complete
+            // persisted record, so drop them.
+            for (day, tokens) in parsed.days where tokens > 0 && day >= cutoffDay {
+                dayTokens[day, default: 0] += tokens
+                dayRequests[day, default: 0] += parsed.dayRequests[day] ?? 0
+            }
+        }
+
+        var result: [UsageDayKey: DailyProviderUsage] = [:]
+        for (day, tokens) in dayTokens where tokens > 0 {
+            // Same 60/40 split and same list price as costSnapshot, so the date view and
+            // the rolling total cannot disagree about what a day cost.
+            let input = Int(Double(tokens) * 0.6)
+            let output = tokens - input
+            let cost = TokenPricingCatalog.estimateUSD(
+                model: "gpt-4o",
+                inputTokens: input,
+                outputTokens: output
+            )
+            result[UsageDayKey(epoch: day)] = DailyProviderUsage(
+                providerID: "copilot",
+                models: [
+                    DailyModelUsage(
+                        model: "github-copilot (est.)",
+                        inputTokens: input,
+                        outputTokens: output,
+                        cacheReadTokens: 0,
+                        totalVolume: tokens,
+                        estimatedCostUSD: cost,
+                        requestCount: dayRequests[day] ?? 0,
+                        volumeUnit: .estimatedTokens
+                    )
+                ],
+                volumeUnit: .estimatedTokens,
+                fidelity: .dayTotalsOnly
+            )
+        }
+        return result
+    }
+
+    private static func parseFile(path: String, url: URL, mtime: Date, size: Int) -> (requests: Int, days: [Int: Int], dayRequests: [Int: Int]) {
         cacheLock.lock()
         if let c = fileCache[path], c.mtime == mtime, c.size == size {
             cacheLock.unlock()
-            return (c.requests, c.days)
+            return (c.requests, c.days, c.dayRequests)
         }
         cacheLock.unlock()
 
         let mtimeDay = dayKey(for: mtime)
         guard let content = try? String(contentsOf: url, encoding: .utf8) else {
-            return (0, [:])
+            return (0, [:], [:])
         }
         var days: [Int: Int] = [:]
+        var dayRequests: [Int: Int] = [:]
         var requests = 0
         for line in content.split(whereSeparator: \.isNewline) {
             guard let data = String(line).data(using: .utf8),
@@ -733,13 +1101,14 @@ enum LocalCopilotUsage {
             // must not retag its whole history as "today" (the old file-mtime bug).
             let day = copilotDayKey(timestamp: json["timestamp"] as? String, fallbackDayKey: mtimeDay)
             days[day, default: 0] += tokens
+            dayRequests[day, default: 0] += 1
             requests += 1
         }
 
         cacheLock.lock()
-        fileCache[path] = (mtime, size, requests, days)
+        fileCache[path] = (mtime, size, requests, days, dayRequests)
         cacheLock.unlock()
-        return (requests, days)
+        return (requests, days, dayRequests)
     }
 
     private static let copilotISO: ISO8601DateFormatter = {

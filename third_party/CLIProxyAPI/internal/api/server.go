@@ -553,6 +553,14 @@ func (s *Server) registerManagementRoutes() {
 
 	log.Info("management routes registered after secret key configuration")
 
+	// Auth-mode discovery sits deliberately OUTSIDE s.mgmt.Middleware(): the console
+	// must learn whether a key is required before it can ask for one, and probing an
+	// authenticated route with an empty key would count as a failed attempt and
+	// self-ban the caller after five page loads. See handlers/management/auth_mode.go.
+	probe := s.engine.Group("/v0/management")
+	probe.Use(s.managementAvailabilityMiddleware())
+	probe.GET("/auth-mode", s.mgmt.GetAuthMode)
+
 	mgmt := s.engine.Group("/v0/management")
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
@@ -576,6 +584,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/error-logs-max-files", s.mgmt.GetErrorLogsMaxFiles)
 		mgmt.PUT("/error-logs-max-files", s.mgmt.PutErrorLogsMaxFiles)
 		mgmt.PATCH("/error-logs-max-files", s.mgmt.PutErrorLogsMaxFiles)
+
+		// Per-date usage, read from the history the macOS app persists. See
+		// handlers/management/usage_daily.go for why this is not rescanned here.
+		mgmt.GET("/usage-daily", s.mgmt.GetUsageDaily)
 
 		mgmt.GET("/usage-statistics-enabled", s.mgmt.GetUsageStatisticsEnabled)
 		mgmt.PUT("/usage-statistics-enabled", s.mgmt.PutUsageStatisticsEnabled)
@@ -1315,10 +1327,25 @@ func (s *Server) Stop(ctx context.Context) error {
 // corsMiddleware returns a Gin middleware handler that adds CORS headers
 // to every response, allowing cross-origin requests.
 //
+// The wildcard is appropriate for the inference endpoints, which are authorised by a
+// per-request API key no browser would hold. It is NOT appropriate for the management
+// API, which can be authorised by request origin alone (localhost, auth disabled) and
+// serves plaintext credentials — so those routes get the strict policy in
+// management_cors.go instead. The branch lives here, ahead of any route-group
+// middleware, because this handler runs first and would otherwise have already written
+// Access-Control-Allow-Origin: * by the time a group could intervene.
+//
 // Returns:
 //   - gin.HandlerFunc: The CORS middleware handler
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if c != nil && c.Request != nil && isManagementPath(c.Request.URL.Path) {
+			if applyManagementCORS(c) {
+				c.Next()
+			}
+			return
+		}
+
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "*")

@@ -37,19 +37,33 @@ enum ConfigComposer {
     /// CLIProxyAPI returns HTTP 404 for all `/v0/management/*` routes when secret-key is empty.
     /// Always inject a plaintext key (CLIProxy bcrypt-hashes it on load). We rewrite
     /// merged-config on every start, so a known plaintext default is intentional.
-    static func ensureManagementSecretKey(in root: inout [String: Any], plaintextKey: String) {
+    ///
+    /// `requireAuth: false` additionally sets `disable-auth`, which drops the password
+    /// prompt for **local** callers only. The key still has to be present, because an
+    /// empty one would 404 the whole management API rather than opening it.
+    /// Defaults to `true` so a caller that forgets the argument fails secure.
+    static func ensureManagementSecretKey(
+        in root: inout [String: Any],
+        plaintextKey: String,
+        requireAuth: Bool = true
+    ) {
         let key = plaintextKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
         var remote = root["remote-management"] as? [String: Any] ?? [:]
         remote["secret-key"] = key
-        // A globally-known default key must never guard a network-exposed API:
-        // force allow-remote off when the shared default is in use, regardless of
-        // user config. A user who wants remote access must set a unique key.
-        if key == ManagementCredentials.defaultSecretKey {
-            remote["allow-remote"] = false
-        } else if remote["allow-remote"] == nil {
-            remote["allow-remote"] = false
-        }
+
+        // A globally-known default key must never guard a network-exposed API, so
+        // allow-remote is honoured only alongside a unique key. A user who wants
+        // remote access must set one.
+        let usesDefaultKey = key == ManagementCredentials.defaultSecretKey
+        let remoteRequested = (remote["allow-remote"] as? Bool ?? false) && !usesDefaultKey
+
+        // Remote management wins over the local convenience toggle. The server refuses
+        // unauthenticated remote calls outright, so dropping the gate on a config that
+        // has remote access turned on would silently break a working setup rather than
+        // save anyone a password prompt.
+        remote["disable-auth"] = !requireAuth && !remoteRequested
+        remote["allow-remote"] = remoteRequested
         root["remote-management"] = remote
     }
     

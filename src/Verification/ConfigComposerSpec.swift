@@ -436,6 +436,83 @@ struct ConfigComposerSpec {
             )
         }
 
+        // The management console is loopback-only, so VibeProxy Ultra lets the user turn the
+        // password off. These checks pin what the composer writes, because the flag it emits
+        // is the only thing standing between "convenient" and "credentials served to the LAN".
+
+        run("management key is injected and the password gate is on by default", recorder: recorder) {
+            var root: [String: Any] = [:]
+            ConfigComposer.ensureManagementSecretKey(in: &root, plaintextKey: "unique-key")
+
+            let remote = dictionary(root["remote-management"])
+            expectEqual(remote["secret-key"] as? String, "unique-key", "the key must be written verbatim", recorder: recorder)
+            // Omitting requireAuth must fail secure: a caller that forgets the argument
+            // should not silently publish an unauthenticated console.
+            expectEqual(remote["disable-auth"] as? Bool, false, "auth must stay on when requireAuth is not passed", recorder: recorder)
+            expectEqual(remote["allow-remote"] as? Bool, false, "remote access must be off unless explicitly requested", recorder: recorder)
+        }
+
+        run("turning the password off sets disable-auth and keeps access local", recorder: recorder) {
+            var root: [String: Any] = [:]
+            ConfigComposer.ensureManagementSecretKey(
+                in: &root,
+                plaintextKey: ManagementCredentials.secretKey,
+                requireAuth: false
+            )
+
+            let remote = dictionary(root["remote-management"])
+            expectEqual(remote["disable-auth"] as? Bool, true, "disable-auth should follow the user's preference", recorder: recorder)
+            // The key stays even with auth off: an empty secret-key 404s every
+            // /v0/management/* route, which would break the console outright.
+            expectEqual(
+                remote["secret-key"] as? String,
+                ManagementCredentials.secretKey,
+                "the key must survive disabling auth or the management API 404s",
+                recorder: recorder
+            )
+            expectEqual(remote["allow-remote"] as? Bool, false, "an unauthenticated console must never be reachable off-box", recorder: recorder)
+        }
+
+        run("configured remote management outranks the local password toggle", recorder: recorder) {
+            var root: [String: Any] = ["remote-management": ["allow-remote": true]]
+            ConfigComposer.ensureManagementSecretKey(
+                in: &root,
+                plaintextKey: "unique-key",
+                requireAuth: false
+            )
+
+            let remote = dictionary(root["remote-management"])
+            // The server refuses unauthenticated remote calls, so honouring the toggle here
+            // would silently break a working remote setup instead of saving a prompt.
+            expectEqual(remote["allow-remote"] as? Bool, true, "an explicit allow-remote must be preserved", recorder: recorder)
+            expectEqual(remote["disable-auth"] as? Bool, false, "the gate must stay up while remote access is live", recorder: recorder)
+        }
+
+        run("the shared default key can never guard a remote-enabled console", recorder: recorder) {
+            var root: [String: Any] = ["remote-management": ["allow-remote": true]]
+            ConfigComposer.ensureManagementSecretKey(
+                in: &root,
+                plaintextKey: ManagementCredentials.defaultSecretKey,
+                requireAuth: true
+            )
+
+            let remote = dictionary(root["remote-management"])
+            expectEqual(
+                remote["allow-remote"] as? Bool,
+                false,
+                "allow-remote must be forced off while the globally-known default key is in use",
+                recorder: recorder
+            )
+        }
+
+        run("a blank key leaves remote-management untouched", recorder: recorder) {
+            var root: [String: Any] = [:]
+            ConfigComposer.ensureManagementSecretKey(in: &root, plaintextKey: "   ", requireAuth: false)
+            // Writing disable-auth without a key would produce a config that is both
+            // unauthenticated and 404ing — worse than writing nothing at all.
+            expectNil(root["remote-management"], "a whitespace-only key must not compose a remote-management block", recorder: recorder)
+        }
+
         if recorder.failures == 0 {
             print("ConfigComposerSpec: all checks passed")
             Foundation.exit(EXIT_SUCCESS)

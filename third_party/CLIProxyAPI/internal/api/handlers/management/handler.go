@@ -151,8 +151,14 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-COMMIT", buildinfo.Commit)
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 
-		clientIP := c.ClientIP()
-		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
+		// Peer address only — NOT c.ClientIP(). The engine runs gin's default trusted-proxy
+		// config, so ClientIP() would return the caller's own X-Forwarded-For value and let
+		// a remote attacker claim to be loopback. See client_ip.go.
+		//
+		// This is also the right ban key: keyed on a client-supplied header, an attacker
+		// could rotate it for unlimited key guesses and poison other callers' entries.
+		clientIP := requestRemoteIP(c)
+		localClient := requestIsLoopback(c)
 
 		// Accept either Authorization: Bearer <key> or X-Management-Key
 		var provided string
@@ -191,15 +197,32 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	var (
 		allowRemote bool
 		secretHash  string
+		disableAuth bool
 	)
 	if cfg != nil {
 		allowRemote = cfg.RemoteManagement.AllowRemote
 		secretHash = cfg.RemoteManagement.SecretKey
+		disableAuth = cfg.RemoteManagement.DisableAuth
 	}
 	if h.allowRemoteOverride {
 		allowRemote = true
 	}
 	envSecret := h.envSecret
+
+	// Auth disabled: local callers skip the key entirely, remote callers are refused
+	// regardless of AllowRemote. This is the guard that makes the toggle safe — an
+	// unauthenticated management API reachable off-box would hand out plaintext API
+	// keys and linked accounts to anyone who can reach the port.
+	//
+	// Checked BEFORE the failed-attempt ban below on purpose: a user who mistyped the
+	// key five times and then switched auth off would otherwise stay locked out of
+	// their own localhost console for the full ban window.
+	if disableAuth {
+		if !localClient {
+			return false, http.StatusForbidden, "management authentication is disabled, so remote access is refused"
+		}
+		return true, 0, ""
+	}
 
 	now := time.Now()
 	h.attemptsMu.Lock()

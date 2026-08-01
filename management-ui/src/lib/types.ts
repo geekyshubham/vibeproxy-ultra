@@ -69,6 +69,61 @@ export interface BackendConfig {
   [key: string]: unknown;
 }
 
+/* --------------------------------------------------------- USAGE BY DATE */
+
+/* GET /v0/management/usage-daily — see
+   third_party/CLIProxyAPI/internal/api/handlers/management/usage_daily.go.
+   The server reads the day history the macOS app writes to Application Support;
+   totals are computed there so the mixed-unit rules (Kiro reports millicredits,
+   everyone else tokens) live in one place per surface. */
+
+/** Volume unit for a usage row. Only token-like units may be summed together. */
+export type UsageVolumeUnit = 'tokens' | 'estimatedTokens' | 'credits';
+
+/** One model's usage within a day. */
+export interface UsageDailyModelRow {
+  providerID: string;
+  providerName: string;
+  model: string;
+  totalVolume: number;
+  volumeUnit: UsageVolumeUnit;
+  estimatedCostUSD: number;
+  requestCount: number;
+}
+
+/** One provider's usage within a day, ranked by cost. */
+export interface UsageDailyProviderRow {
+  providerID: string;
+  providerName: string;
+  totalVolume: number;
+  volumeUnit: UsageVolumeUnit;
+  estimatedCostUSD: number;
+  requestCount: number;
+  /** 'exact' | 'dayTotalsOnly' | 'sessionApproximate'. */
+  fidelity: string;
+  /** Fraction of the day's spend (0..1). Absent when the day has no cost signal,
+   *  so the UI must not render a misleading 0%. */
+  costShare?: number;
+}
+
+/** A single day's usage report. */
+export interface UsageDailyResponse {
+  date: string;
+  /** Token-like units only; Kiro millicredits are excluded by design. */
+  totalTokens: number;
+  totalCostUSD: number;
+  totalRequests: number;
+  providers: UsageDailyProviderRow[] | null;
+  models: UsageDailyModelRow[] | null;
+  /** Human-readable notes for providers whose day attribution is approximate. */
+  caveats: string[] | null;
+  empty: boolean;
+  availableDays: string[] | null;
+  earliestDay?: string;
+  latestDay?: string;
+  updatedAt?: string;
+}
+
 /** One request-log line (GET /logs → logs[] when logging enabled). */
 export interface LogLine {
   time?: string;

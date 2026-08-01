@@ -207,6 +207,18 @@ type RemoteManagement struct {
 	AllowRemote bool `yaml:"allow-remote"`
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
+	// DisableAuth turns off the management key requirement for LOCAL requests only.
+	// VibeProxy Ultra: the console is a localhost tool, so a login prompt adds friction
+	// without adding protection. Remote requests are still rejected while this is true,
+	// even when AllowRemote is set, because the management API hands out plaintext API
+	// keys and linked accounts.
+	//
+	// "Local" means the TCP peer address is loopback (see management/client_ip.go) — not a
+	// forwarding header, which any caller can set. Two limits worth knowing: anything
+	// already running on the machine counts as local, and so does a reverse proxy on the
+	// same host, which forwards a remote caller from a loopback socket. Terminating a
+	// tunnel locally therefore does expose the API; keep auth on in that setup.
+	DisableAuth bool `yaml:"disable-auth"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
 	// DisableAutoUpdatePanel disables automatic periodic background updates of the management panel asset from GitHub.
