@@ -82,7 +82,9 @@ jobs:
       - name: Guard — bundled binary must carry our custom management UI
         run: |
           set -e
-          BIN="VibeProxy.app/Contents/Resources/cli-proxy-api-plus"
+          # Bundle name matches APP_NAME in create-app-bundle.sh and contains a
+          # SPACE, so every path referencing it must stay quoted.
+          BIN="VibeProxy Ultra.app/Contents/Resources/cli-proxy-api-plus"
           if ! grep -a -q 'VibeProxy Ultra' "$BIN"; then
             echo "::error:: bundled cli-proxy-api-plus is MISSING the custom management UI (stock upstream detected) — refusing to ship" >&2
             exit 1
@@ -91,13 +93,13 @@ jobs:
 
       - name: Verify Code Signature
         run: |
-          codesign --verify --deep --strict --verbose=2 VibeProxy.app
-          codesign -dv --verbose=4 VibeProxy.app
-          spctl -a -vvv -t install VibeProxy.app || echo "⚠️ Gatekeeper check failed (expected without notarization)"
+          codesign --verify --deep --strict --verbose=2 "VibeProxy Ultra.app"
+          codesign -dv --verbose=4 "VibeProxy Ultra.app"
+          spctl -a -vvv -t install "VibeProxy Ultra.app" || echo "⚠️ Gatekeeper check failed (expected without notarization)"
 
       - name: Notarize App
         run: |
-          ditto -c -k --sequesterRsrc --keepParent "VibeProxy.app" "VibeProxy-notarize.zip"
+          ditto -c -k --sequesterRsrc --keepParent "VibeProxy Ultra.app" "VibeProxy-notarize.zip"
           
           echo "Submitting app for notarization..."
           SUBMIT_OUTPUT=$(xcrun notarytool submit "VibeProxy-notarize.zip" \
@@ -121,8 +123,8 @@ jobs:
           fi
           
           echo "✅ Notarization succeeded! Stapling ticket..."
-          xcrun stapler staple "VibeProxy.app"
-          xcrun stapler validate "VibeProxy.app"
+          xcrun stapler staple "VibeProxy Ultra.app"
+          xcrun stapler validate "VibeProxy Ultra.app"
           echo "✅ App successfully notarized and stapled!"
           
           rm "VibeProxy-notarize.zip"
@@ -132,17 +134,17 @@ jobs:
           brew install create-dmg
 
           create-dmg \
-            --volname "VibeProxy" \
+            --volname "VibeProxy Ultra" \
             --volicon "icon.png" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
-            --icon "VibeProxy.app" 175 120 \
-            --hide-extension "VibeProxy.app" \
+            --icon "VibeProxy Ultra.app" 175 120 \
+            --hide-extension "VibeProxy Ultra.app" \
             --app-drop-link 425 120 \
             --codesign "${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}" \
             "VibeProxy-${{ matrix.arch }}.dmg" \
-            "VibeProxy.app" || true
+            "VibeProxy Ultra.app" || true
 
           if [ -f "VibeProxy-${{ matrix.arch }}.dmg" ]; then
             echo "✅ DMG created successfully"
@@ -151,7 +153,8 @@ jobs:
 
       - name: Create ZIP archive
         run: |
-          ditto -c -k --sequesterRsrc --keepParent "VibeProxy.app" "VibeProxy-${{ matrix.arch }}.zip"
+          # Archive keeps a space-free name so its download URL needs no %20 escaping.
+          ditto -c -k --sequesterRsrc --keepParent "VibeProxy Ultra.app" "VibeProxy-${{ matrix.arch }}.zip"
 
       - name: Calculate checksums
         run: |
