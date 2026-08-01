@@ -21,22 +21,25 @@ echo ""
 # Clean previous builds
 echo -e "${BLUE}🧹 Cleaning previous builds...${NC}"
 cd "$PROJECT_DIR"
-rm -rf VibeProxy.app
+# Must match APP_NAME in create-app-bundle.sh. Contains a SPACE, so keep it quoted.
+APP_BUNDLE="VibeProxy Ultra.app"
+
+rm -rf "$APP_BUNDLE"
 rm -f VibeProxy.zip
 rm -f VibeProxy.dmg
 
 # Build the app
-echo -e "${BLUE}🔨 Building VibeProxy...${NC}"
+echo -e "${BLUE}🔨 Building VibeProxy Ultra...${NC}"
 ./create-app-bundle.sh
 
-if [ ! -d "VibeProxy.app" ]; then
-    echo -e "${RED}❌ Build failed - VibeProxy.app not found${NC}"
+if [ ! -d "$APP_BUNDLE" ]; then
+    echo -e "${RED}❌ Build failed - ${APP_BUNDLE} not found${NC}"
     exit 1
 fi
 
-# Create ZIP
+# Create ZIP. The archive keeps a space-free name so its download URL needs no escaping.
 echo -e "${BLUE}📦 Creating ZIP archive...${NC}"
-ditto -c -k --sequesterRsrc --keepParent "VibeProxy.app" "VibeProxy-${VERSION}.zip"
+ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "VibeProxy-${VERSION}.zip"
 
 # Calculate checksum
 echo -e "${BLUE}🔐 Calculating checksum...${NC}"
@@ -47,7 +50,7 @@ echo ""
 echo -e "${GREEN}✅ Release created successfully!${NC}"
 echo ""
 echo -e "${BLUE}Files created:${NC}"
-echo "  - VibeProxy.app (local testing)"
+echo "  - ${APP_BUNDLE} (local testing)"
 echo "  - VibeProxy-${VERSION}.zip (for distribution)"
 echo ""
 echo -e "${BLUE}SHA-256 Checksum:${NC}"

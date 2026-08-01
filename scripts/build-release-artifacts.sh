@@ -12,6 +12,13 @@ OUT_DIR="${OUT_DIR:-$PROJECT_DIR/dist}"
 RESOURCES="$PROJECT_DIR/src/Sources/Resources"
 BINARY_PATH="$RESOURCES/cli-proxy-api-plus"
 BACKUP_BINARY="$(mktemp)"
+# Must match APP_NAME in create-app-bundle.sh. Contains a SPACE, so every path
+# built from it stays quoted — an unquoted use would split into two arguments and
+# silently operate on the wrong path.
+APP_BUNDLE="VibeProxy Ultra.app"
+# Downloadable artifacts keep a space-free stem: it survives URLs without %20
+# escaping and matches the asset names used by earlier releases.
+ARTIFACT_STEM="VibeProxy"
 
 GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 
@@ -38,7 +45,7 @@ make_dmg() {
   local dmg_path="$2"
   local stage
   stage=$(mktemp -d)
-  cp -R "$app_path" "$stage/VibeProxy.app"
+  cp -R "$app_path" "$stage/$APP_BUNDLE"
   # Brand the DMG volume with the rocket app icon (matches the CI create-dmg
   # --volicon path) so the mounted disk isn't a generic removable-disk icon.
   if [ -f "$RESOURCES/AppIcon.icns" ]; then
@@ -54,26 +61,26 @@ build_arch() {
   echo ""
   echo -e "${BLUE}🏗️  Building ${arch}…${NC}"
   build_cliproxy "$arch"
-  rm -rf "$PROJECT_DIR/VibeProxy.app"
+  rm -rf "$PROJECT_DIR/$APP_BUNDLE"
   APP_VERSION="$VERSION" TARGET_ARCH="$arch" ./create-app-bundle.sh
-  if [ ! -d "$PROJECT_DIR/VibeProxy.app" ]; then
-    echo -e "${RED}VibeProxy.app missing after build (${arch})${NC}" >&2
+  if [ ! -d "$PROJECT_DIR/$APP_BUNDLE" ]; then
+    echo -e "${RED}${APP_BUNDLE} missing after build (${arch})${NC}" >&2
     exit 1
   fi
 
-  local zip_path="$OUT_DIR/VibeProxy-${arch}.zip"
-  local dmg_path="$OUT_DIR/VibeProxy-${arch}.dmg"
+  local zip_path="$OUT_DIR/${ARTIFACT_STEM}-${arch}.zip"
+  local dmg_path="$OUT_DIR/${ARTIFACT_STEM}-${arch}.dmg"
   rm -f "$zip_path" "$dmg_path" "${zip_path}.sha256" "${dmg_path}.sha256"
 
   echo -e "${BLUE}📦 ZIP ${arch}${NC}"
-  ditto -c -k --sequesterRsrc --keepParent "VibeProxy.app" "$zip_path"
+  ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$zip_path"
   shasum -a 256 "$zip_path" | awk '{print $1 "  " $2}' | sed "s|$OUT_DIR/||" > "${zip_path}.sha256"
   # rewrite sha256 file to basenames for users
-  (cd "$OUT_DIR" && shasum -a 256 "VibeProxy-${arch}.zip" > "VibeProxy-${arch}.zip.sha256")
+  (cd "$OUT_DIR" && shasum -a 256 "${ARTIFACT_STEM}-${arch}.zip" > "${ARTIFACT_STEM}-${arch}.zip.sha256")
 
   echo -e "${BLUE}💿 DMG ${arch}${NC}"
-  make_dmg "VibeProxy.app" "$dmg_path"
-  (cd "$OUT_DIR" && shasum -a 256 "VibeProxy-${arch}.dmg" > "VibeProxy-${arch}.dmg.sha256")
+  make_dmg "$APP_BUNDLE" "$dmg_path"
+  (cd "$OUT_DIR" && shasum -a 256 "${ARTIFACT_STEM}-${arch}.dmg" > "${ARTIFACT_STEM}-${arch}.dmg.sha256")
 
   ls -lh "$zip_path" "$dmg_path"
   echo -e "${GREEN}✅ ${arch} artifacts ready${NC}"

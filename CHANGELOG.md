@@ -28,6 +28,7 @@ Both of these were found by an adversarial audit of this release before it shipp
 - The console's provider-name table was missing Cursor, CodeBuddy, GitLab and Kilo, and mis-cased unknown providers.
 
 ### Changed
+- The app bundle is now named **VibeProxy Ultra.app**, matching the name already shown in the menu bar and About window. Settings and usage history are unaffected — they are keyed on the bundle identifier and a fixed Application Support path, not the bundle filename. Downloadable archives keep their existing space-free names (`VibeProxy-arm64.zip`), so download URLs are unchanged.
 - Kiro plan credits are kept out of token totals throughout (they are stored as millicredits, so summing them would inflate a token count ~1000× per credit). Providers are ranked by **cost**, the only basis comparable across unlike units.
 - Version **1.3.1**.
 

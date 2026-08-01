@@ -12,7 +12,11 @@ NC='\033[0m'
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$PROJECT_DIR/src"
-APP_NAME="VibeProxy"
+# The bundle filename is the user-visible app name in Finder and the Dock, so it
+# matches CFBundleName/CFBundleDisplayName in src/Info.plist ("VibeProxy Ultra").
+# NOTE: this contains a SPACE — every path built from it must stay quoted, here and
+# in scripts/build-release-artifacts.sh and .github/workflows/release.yml.
+APP_NAME="VibeProxy Ultra"
 BUNDLE_ID="com.cliproxyapi.menubar"
 BUILD_DIR="$SRC_DIR/.build/release"
 APP_DIR="$PROJECT_DIR/$APP_NAME.app"
