@@ -117,7 +117,8 @@ enum LocalTokenCostScanner {
         var results: [[UsageDayKey: DailyProviderUsage]] = []
 
         // Per-event timestamps in jsonl trees → exact per-day, per-model attribution.
-        let jsonlTypes: [ServiceType] = [.codex, .claude, .gemini, .antigravity]
+        // Antigravity is handled by LocalAntigravityUsage (conversation DBs), not the empty ~/.antigravity tree.
+        let jsonlTypes: [ServiceType] = [.codex, .claude, .gemini]
         for type in jsonlTypes {
             if let daily = dailyUsage(for: type, now: now, historyDays: historyDays), !daily.isEmpty {
                 results.append(daily)
@@ -125,16 +126,18 @@ enum LocalTokenCostScanner {
         }
 
         // Specialized aggregators, each reporting its own fidelity:
-        //   Kiro     — per-turn credit metering, exact.
-        //   OpenCode — per-turn `message` rows, exact when they name a model.
-        //   Grok     — whole-session estimate on one day, sessionApproximate.
-        //   Copilot  — real day totals, no model dimension, dayTotalsOnly.
+        //   Kiro         — per-turn credit metering, exact.
+        //   OpenCode     — per-turn `message` rows, exact when they name a model.
+        //   Antigravity  — IDE conversation gen_metadata, sessionApproximate.
+        //   Grok         — whole-session estimate on one day, sessionApproximate.
+        //   Copilot      — real day totals, no model dimension, dayTotalsOnly.
         // Copilot has no generic-tree fallback here (unlike allProviderSnapshots): the
         // generic scan buckets by file mtime, which would pin an append-only transcript's
         // whole history onto the day it was last reopened.
         let specialized = [
             LocalKiroCredits.dailyUsage(now: now, historyDays: historyDays),
             LocalOpenCodeUsage.dailyUsage(now: now, historyDays: historyDays),
+            LocalAntigravityUsage.dailyUsage(now: now, historyDays: historyDays),
             LocalGrokUsage.dailyUsage(now: now, historyDays: historyDays),
             LocalCopilotUsage.dailyUsage(now: now, historyDays: historyDays),
         ]
@@ -147,11 +150,11 @@ enum LocalTokenCostScanner {
     static func allProviderSnapshots(now: Date = Date(), historyDays: Int = 30) -> [ProviderCostSnapshot] {
         var results: [ProviderCostSnapshot] = []
 
-        // Classic CLI jsonl trees
-        let jsonlTypes: [ServiceType] = [.codex, .claude, .gemini, .antigravity]
+        // Classic CLI jsonl trees (Antigravity uses LocalAntigravityUsage below).
+        let jsonlTypes: [ServiceType] = [.codex, .claude, .gemini]
         results.append(contentsOf: jsonlTypes.compactMap { snapshot(for: $0, now: now, historyDays: historyDays) })
 
-        // Specialized aggregators (Kiro session JSON, Grok signals, OpenCode SQLite, Copilot JB logs)
+        // Specialized aggregators (Kiro, Grok, OpenCode, Antigravity IDE, Copilot)
         if let kiro = LocalKiroCredits.costSnapshot(now: now, historyDays: historyDays) {
             results.append(kiro)
         }
@@ -160,6 +163,9 @@ enum LocalTokenCostScanner {
         }
         if let opencode = LocalOpenCodeUsage.costSnapshot(now: now, historyDays: historyDays) {
             results.append(opencode)
+        }
+        if let antigravity = LocalAntigravityUsage.costSnapshot(now: now, historyDays: historyDays) {
+            results.append(antigravity)
         }
         // Prefer specialized Copilot estimate when present; else fall back to generic tree scan.
         if let copilot = LocalCopilotUsage.costSnapshot(now: now, historyDays: historyDays) {
@@ -216,8 +222,11 @@ enum LocalTokenCostScanner {
                 home.appendingPathComponent(".config/github-copilot"),
             ])
         case .antigravity:
-            // NOTE: do NOT include ~/.gemini here — it double-counted Gemini usage.
+            // Prefer LocalAntigravityUsage (conversation DBs). Keep brain transcripts as a
+            // secondary jsonl path for older installs; never scan whole ~/.gemini (Gemini CLI).
             return ScanRoots(providerID: "antigravity", directories: [
+                home.appendingPathComponent(".gemini/antigravity-ide/brain"),
+                home.appendingPathComponent(".gemini/antigravity-ide/conversations"),
                 home.appendingPathComponent(".antigravity"),
             ])
         default:

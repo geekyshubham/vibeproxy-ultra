@@ -242,6 +242,77 @@ struct MenuBarPanelView: View {
                 startCollapsed: true
             )
         }
+
+        // Local CLI usage without a proxy seat (OpenCode DB, etc.) — still belongs on Overview.
+        ForEach(localOnlyCostProviders, id: \.providerID) { cost in
+            localCostCard(cost)
+        }
+    }
+
+    /// Cost snapshots that have no matching ServiceType account card (OpenCode is the main case).
+    private var localOnlyCostProviders: [ProviderCostSnapshot] {
+        let accountProviderIDs = Set(
+            ServiceType.allCases.compactMap(\.usageProviderID)
+        )
+        return usageStore.analytics?.byProvider.filter { cost in
+            !accountProviderIDs.contains(cost.providerID)
+                && (cost.last30DaysTokens > 0 || (cost.last30DaysCostUSD ?? 0) > 0)
+        } ?? []
+    }
+
+    @ViewBuilder
+    private func localCostCard(_ cost: ProviderCostSnapshot) -> some View {
+        let tint = UsageProviderNaming.tint(forProviderID: cost.providerID)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Circle().fill(tint).frame(width: 8, height: 8)
+                Text(UsageProviderNaming.displayName(forProviderID: cost.providerID))
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("local CLI")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+            }
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("30-day")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(UsageNumberFormatter.tokens(cost.last30DaysTokens))
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                    if settings.showCostEstimates, let usd = cost.last30DaysCostUSD, usd > 0 {
+                        Text(UsageNumberFormatter.usd(usd))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Today")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(UsageNumberFormatter.tokens(cost.sessionTokens))
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                    if settings.showCostEstimates, let usd = cost.sessionCostUSD, usd > 0 {
+                        Text(UsageNumberFormatter.usd(usd))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let top = cost.models.first {
+                Text("Top: \(top.model)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(MenuBarDesign.cardPadding)
+        .cardSurface(tint: tint)
     }
 
     private func overviewPulse(_ analytics: AnalyticsOverview) -> some View {

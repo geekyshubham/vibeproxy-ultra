@@ -1265,7 +1265,7 @@ struct SettingsView: View {
 
             Section("Active Mac session & switching") {
                 if switchableProvidersWithAccounts.isEmpty {
-                    Text("Connect Codex, Claude, or Gemini accounts to manage the live native session.")
+                    Text("Connect Codex, Claude, Gemini, or Antigravity accounts to manage the live native session.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -1296,7 +1296,7 @@ struct SettingsView: View {
                     }
                 }
                 Toggle("Restart the desktop app after switching", isOn: $settings.restartAppOnSwitch)
-                Text("Like Cockpit: quit Codex/Claude (and matching CLI processes), then relaunch so the new account or ChatGPT subscription is loaded.")
+                Text("Like Cockpit: quit Codex/Claude/Antigravity IDE (and matching CLI processes), then relaunch so the new account or ChatGPT subscription is loaded.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Toggle("Ask before switching accounts", isOn: $settings.confirmBeforeSwitch)

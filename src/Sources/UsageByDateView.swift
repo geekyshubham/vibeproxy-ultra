@@ -12,7 +12,7 @@ enum UsageProviderNaming {
         case "copilot": return "Copilot"
         case "kiro": return "Kiro CLI"
         case "grok": return "Grok CLI"
-        case "opencode": return "OpenCode"
+        case "opencode", "opencode-go": return "OpenCode"
         case "zai", "z.ai": return "Z.AI"
         case "kimi": return "Kimi"
         case "qwen": return "Qwen"
@@ -26,7 +26,11 @@ enum UsageProviderNaming {
 
     /// Provider tint, resolved through `ServiceType` when the ID maps to one.
     static func tint(forProviderID providerID: String) -> Color {
-        guard let type = ServiceType.allCases.first(where: { $0.usageProviderID == providerID }) else {
+        let id = providerID.lowercased()
+        if id == "opencode" || id == "opencode-go" {
+            return Color(red: 0.95, green: 0.55, blue: 0.20)
+        }
+        guard let type = ServiceType.allCases.first(where: { $0.usageProviderID == id }) else {
             return MenuBarDesign.accent
         }
         return MenuBarDesign.providerTint(for: type)

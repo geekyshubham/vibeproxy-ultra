@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SQLite3
 
 /// Identity of whatever account is *currently live* in a native tool.
 struct NativeSessionIdentity: Equatable {
@@ -21,7 +22,8 @@ enum NativeSwitchOutcome: Equatable {
 ///
 /// VibeProxy stores accounts as CLIProxy auth files under `~/.cli-proxy-api/`; this
 /// manager translates a selected account's tokens into the *native* auth location
-/// (`~/.codex/auth.json`, `~/.claude/.credentials.json`, `~/.gemini/oauth_creds.json`).
+/// (`~/.codex/auth.json`, `~/.claude/.credentials.json`, `~/.gemini/oauth_creds.json`,
+/// Antigravity IDE `state.vscdb` + Cockpit `current_account.json`).
 ///
 /// For ChatGPT/Codex, one OAuth login can own **multiple** workspaces (Go + Team/Enterprise).
 /// `switchTo(..., chatGPTAccountID:)` writes that membership's id into `tokens.account_id`
@@ -38,10 +40,10 @@ final class NativeSessionManager: ObservableObject {
     private let fileManager = FileManager.default
     private var home: URL { FileManager.default.homeDirectoryForCurrentUser }
 
-    /// Providers we can both detect and switch. (Antigravity is intentionally excluded:
-    /// it does not use ~/.gemini/google_accounts.json, so reusing Gemini's identity/creds
-    /// would be wrong.)
-    static let switchableProviderIDs: Set<String> = ["codex", "claude", "gemini"]
+    /// Providers we can both detect and switch.
+    /// Antigravity uses its own IDE state DB + Cockpit pointer — not Gemini's
+    /// `~/.gemini/google_accounts.json`.
+    static let switchableProviderIDs: Set<String> = ["codex", "claude", "gemini", "antigravity"]
 
     func supportsSwitching(_ type: ServiceType) -> Bool {
         guard let id = type.usageProviderID else { return false }
@@ -113,6 +115,7 @@ final class NativeSessionManager: ObservableObject {
         case .codex: return detectCodexIdentity()
         case .claude: return detectClaudeIdentity()
         case .gemini: return detectGoogleIdentity()
+        case .antigravity: return detectAntigravityIdentity()
         default: return nil
         }
     }
@@ -155,6 +158,35 @@ final class NativeSessionManager: ObservableObject {
         guard let json = readJSON(url) else { return nil }
         guard let active = json["active"] as? String, !active.isEmpty else { return nil }
         return NativeSessionIdentity(email: active, accountID: nil, plan: nil)
+    }
+
+    private func detectAntigravityIdentity() -> NativeSessionIdentity? {
+        // 1) Cockpit pointer (written on switch).
+        if let email = readAntigravityCurrentEmail() {
+            return NativeSessionIdentity(email: email, accountID: nil, plan: nil)
+        }
+        // 2) Email embedded in Antigravity IDE userStatus state.
+        if let email = readAntigravityIDEEmail() {
+            return NativeSessionIdentity(email: email, accountID: nil, plan: nil)
+        }
+        // 3) Token present but identity unknown — still mark as logged-in.
+        if readAntigravityStateValue(key: Self.antigravityOAuthTokenKey) != nil {
+            return NativeSessionIdentity(email: nil, accountID: nil, plan: nil)
+        }
+        return nil
+    }
+
+    private func readAntigravityCurrentEmail() -> String? {
+        let url = home.appendingPathComponent(".antigravity_cockpit/current_account.json")
+        guard let json = readJSON(url),
+              let email = nonEmpty(json["email"])
+        else { return nil }
+        return email
+    }
+
+    private func readAntigravityIDEEmail() -> String? {
+        guard let raw = readAntigravityStateValue(key: Self.antigravityUserStatusKey) else { return nil }
+        return Self.extractEmailFromAntigravityUserStatus(raw)
     }
 
     private func matches(_ account: AuthAccount, _ identity: NativeSessionIdentity) -> Bool {
@@ -260,6 +292,13 @@ final class NativeSessionManager: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
         let authFilePath = account.filePath
+
+        // Antigravity IDE keeps state.vscdb open; quit first when restart-on-switch is on
+        // so the oauthToken write is not blocked / overwritten.
+        if type == .antigravity, restartApp {
+            _ = await quitApps(for: type)
+        }
+
         let writeError: String? = await Task.detached(priority: .userInitiated) { [self] in
             do {
                 switch type {
@@ -272,6 +311,7 @@ final class NativeSessionManager: ObservableObject {
                     )
                 case .claude: try writeClaudeAuth(from: src)
                 case .gemini: try writeGoogleAuth(from: src, email: email)
+                case .antigravity: try writeAntigravityAuth(from: src, email: email)
                 default: return "Switching \(type.displayName) is not supported yet."
                 }
                 return nil
@@ -304,7 +344,13 @@ final class NativeSessionManager: ObservableObject {
             ?? account.baseDisplayName
         var msg = "Switched \(type.displayName) to \(targetName)."
         if restartApp {
-            let restarted = await restartApps(for: type)
+            // Antigravity was already quit above; only relaunch.
+            let restarted: [String]
+            if type == .antigravity {
+                restarted = await relaunchApps(for: type)
+            } else {
+                restarted = await restartApps(for: type)
+            }
             if !restarted.isEmpty {
                 msg += " Restarted \(restarted.joined(separator: ", "))."
             } else {
@@ -492,17 +538,375 @@ final class NativeSessionManager: ObservableObject {
         }
     }
 
+    /// Inject OAuth into Antigravity IDE `state.vscdb` (same wire format Cockpit uses) and
+    /// update Cockpit's `current_account.json` pointer for detection.
+    private func writeAntigravityAuth(from src: [String: Any], email: String?) throws {
+        guard let access = nonEmpty(src["access_token"]) else {
+            throw SwitchError.missingToken("access_token")
+        }
+        let refresh = nonEmpty(src["refresh_token"])
+        let expirySeconds = antigravityExpirySeconds(from: src)
+
+        let existing = readAntigravityStateValue(key: Self.antigravityOAuthTokenKey)
+        let tokenValue = try Self.buildAntigravityOAuthTokenValue(
+            accessToken: access,
+            refreshToken: refresh,
+            expirySeconds: expirySeconds,
+            existingValue: existing
+        )
+        try writeAntigravityStateValue(key: Self.antigravityOAuthTokenKey, value: tokenValue)
+
+        if let email {
+            let url = home.appendingPathComponent(".antigravity_cockpit/current_account.json")
+            try ensureParent(url)
+            let payload: [String: Any] = [
+                "email": email,
+                "updated_at": Int(Date().timeIntervalSince1970),
+            ]
+            try backupThenWrite(json: payload, to: url)
+        }
+    }
+
+    private func antigravityExpirySeconds(from src: [String: Any]) -> Int {
+        if let expired = nonEmpty(src["expired"]) {
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let plain = ISO8601DateFormatter()
+            plain.formatOptions = [.withInternetDateTime]
+            if let date = iso.date(from: expired) ?? plain.date(from: expired) {
+                return Int(date.timeIntervalSince1970)
+            }
+        }
+        if let expiresIn = src["expires_in"] as? Int, expiresIn > 0 {
+            return Int(Date().addingTimeInterval(TimeInterval(expiresIn)).timeIntervalSince1970)
+        }
+        if let ts = src["expiry_timestamp"] as? Double, ts > 0 {
+            return Int(ts)
+        }
+        if let ts = src["expiry_timestamp"] as? Int, ts > 0 {
+            return ts
+        }
+        return Int(Date().addingTimeInterval(3600).timeIntervalSince1970)
+    }
+
+    // MARK: - Antigravity IDE state.vscdb (Cockpit-compatible)
+
+    private static let antigravityOAuthTokenKey = "antigravityUnifiedStateSync.oauthToken"
+    private static let antigravityUserStatusKey = "antigravityUnifiedStateSync.userStatus"
+    private static let antigravityAuthStateSentinel = "authStateWithContextSentinelKey"
+    private static let antigravityOAuthInfoSentinel = "oauthTokenInfoSentinelKey"
+    private static let antigravitySignedInStateJSON =
+        #"{"state":"signedIn","context":{"project":"","showProjectError":false,"errorMessage":"","ineligibleMessage":"","verificationUrl":"","isGcpTos":false,"browserOpenFailed":false,"appealUrl":"","appealLinkText":""}}"#
+
+    private var antigravityStateDBURL: URL {
+        home.appendingPathComponent(
+            "Library/Application Support/Antigravity IDE/User/globalStorage/state.vscdb"
+        )
+    }
+
+    private func readAntigravityStateValue(key: String) -> String? {
+        let path = antigravityStateDBURL.path
+        guard fileManager.fileExists(atPath: path) else { return nil }
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            sqlite3_close(db)
+            return nil
+        }
+        defer { sqlite3_close(db) }
+
+        let sql = "SELECT value FROM ItemTable WHERE key = ? LIMIT 1"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, key, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        if let cstr = sqlite3_column_text(stmt, 0) {
+            return String(cString: cstr)
+        }
+        let bytes = sqlite3_column_bytes(stmt, 0)
+        if bytes > 0, let blob = sqlite3_column_blob(stmt, 0) {
+            let data = Data(bytes: blob, count: Int(bytes))
+            return String(data: data, encoding: .utf8)
+        }
+        return nil
+    }
+
+    private func writeAntigravityStateValue(key: String, value: String) throws {
+        let url = antigravityStateDBURL
+        try ensureParent(url)
+        let path = url.path
+        // Create empty DB + table if IDE has never been launched.
+        if !fileManager.fileExists(atPath: path) {
+            var createDB: OpaquePointer?
+            guard sqlite3_open(path, &createDB) == SQLITE_OK else {
+                sqlite3_close(createDB)
+                throw SwitchError.resolveFailed("Could not create Antigravity IDE state database")
+            }
+            defer { sqlite3_close(createDB) }
+            let createSQL = "CREATE TABLE IF NOT EXISTS ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)"
+            if sqlite3_exec(createDB, createSQL, nil, nil, nil) != SQLITE_OK {
+                throw SwitchError.resolveFailed("Could not initialize Antigravity IDE state database")
+            }
+        }
+
+        var db: OpaquePointer?
+        guard sqlite3_open(path, &db) == SQLITE_OK else {
+            sqlite3_close(db)
+            throw SwitchError.resolveFailed("Could not open Antigravity IDE state database (is Antigravity IDE fully closed?)")
+        }
+        defer { sqlite3_close(db) }
+
+        let sql = "INSERT INTO ItemTable (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw SwitchError.resolveFailed("Could not prepare Antigravity state write")
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, key, -1, SQLITE_TRANSIENT)
+        let valueData = Data(value.utf8)
+        valueData.withUnsafeBytes { raw in
+            let ptr = raw.bindMemory(to: UInt8.self).baseAddress
+            sqlite3_bind_blob(stmt, 2, ptr, Int32(valueData.count), SQLITE_TRANSIENT)
+        }
+
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            let msg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown SQLite error"
+            throw SwitchError.resolveFailed("Antigravity state write failed: \(msg)")
+        }
+    }
+
+    /// Build the base64 `antigravityUnifiedStateSync.oauthToken` blob Cockpit/IDE expect.
+    /// Preserves other sentinel rows from `existingValue` when present.
+    static func buildAntigravityOAuthTokenValue(
+        accessToken: String,
+        refreshToken: String?,
+        expirySeconds: Int,
+        existingValue: String?
+    ) throws -> String {
+        var sentinels = parseAntigravitySentinelMap(existingValue)
+        sentinels[antigravityAuthStateSentinel] = antigravitySignedInStateJSON
+        sentinels[antigravityOAuthInfoSentinel] = encodeAntigravityOAuthInfoB64(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            expirySeconds: expirySeconds
+        )
+        // Prefer stable order: auth state first, then oauth info, then any extras.
+        var ordered: [(String, String)] = []
+        if let v = sentinels.removeValue(forKey: antigravityAuthStateSentinel) {
+            ordered.append((antigravityAuthStateSentinel, v))
+        }
+        if let v = sentinels.removeValue(forKey: antigravityOAuthInfoSentinel) {
+            ordered.append((antigravityOAuthInfoSentinel, v))
+        }
+        for key in sentinels.keys.sorted() {
+            if let v = sentinels[key] { ordered.append((key, v)) }
+        }
+        let outer = encodeAntigravitySentinelMap(ordered)
+        return outer.base64EncodedString()
+    }
+
+    /// Parse access token from an IDE oauthToken value (for tests / diagnostics).
+    static func parseAntigravityAccessToken(fromOAuthTokenValue value: String) -> String? {
+        let sentinels = parseAntigravitySentinelMap(value)
+        guard let infoB64 = sentinels[antigravityOAuthInfoSentinel],
+              let infoData = Data(base64Encoded: infoB64)
+        else { return nil }
+        let fields = protoParseLengthDelimited(infoData)
+        return fields.first(where: { $0.field == 1 }).flatMap { String(data: $0.payload, encoding: .utf8) }
+    }
+
+    static func extractEmailFromAntigravityUserStatus(_ raw: String) -> String? {
+        guard let outer = Data(base64Encoded: raw) else {
+            return firstEmail(in: raw)
+        }
+        if let email = firstEmail(in: String(data: outer, encoding: .utf8) ?? "") {
+            return email
+        }
+        // Nested base64 blobs inside the protobuf often hold name/email.
+        let ascii = String(decoding: outer, as: UTF8.self)
+        let pattern = try? NSRegularExpression(pattern: "[A-Za-z0-9+/=]{24,}")
+        let range = NSRange(ascii.startIndex..., in: ascii)
+        let matches = pattern?.matches(in: ascii, range: range) ?? []
+        for match in matches {
+            guard let r = Range(match.range, in: ascii) else { continue }
+            let chunk = String(ascii[r])
+            guard let decoded = Data(base64Encoded: chunk) else { continue }
+            if let email = firstEmail(in: String(data: decoded, encoding: .utf8) ?? "") {
+                return email
+            }
+            // Email may sit as a raw length-prefixed string without being UTF-8-clean overall.
+            if let email = firstEmail(in: String(decoding: decoded, as: UTF8.self)) {
+                return email
+            }
+        }
+        return firstEmail(in: String(decoding: outer, as: UTF8.self))
+    }
+
+    private static func firstEmail(in text: String) -> String? {
+        let pattern = try? NSRegularExpression(
+            pattern: #"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"#,
+            options: [.caseInsensitive]
+        )
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = pattern?.firstMatch(in: text, range: range),
+              let r = Range(match.range, in: text)
+        else { return nil }
+        return String(text[r])
+    }
+
+    private static func parseAntigravitySentinelMap(_ value: String?) -> [String: String] {
+        guard let value,
+              let outer = Data(base64Encoded: value)
+        else { return [:] }
+        var result: [String: String] = [:]
+        // Top-level: repeated field 1 messages { field1: key, field2: { field1: value } }
+        for entry in protoParseLengthDelimited(outer) where entry.field == 1 {
+            let inner = protoParseLengthDelimited(entry.payload)
+            guard let keyData = inner.first(where: { $0.field == 1 })?.payload,
+                  let key = String(data: keyData, encoding: .utf8)
+            else { continue }
+            guard let valueMsg = inner.first(where: { $0.field == 2 })?.payload else { continue }
+            let valueFields = protoParseLengthDelimited(valueMsg)
+            if let valData = valueFields.first(where: { $0.field == 1 })?.payload,
+               let val = String(data: valData, encoding: .utf8)
+            {
+                result[key] = val
+            }
+        }
+        return result
+    }
+
+    private static func encodeAntigravitySentinelMap(_ entries: [(String, String)]) -> Data {
+        var out = Data()
+        for (key, value) in entries {
+            let valueMsg = protoEncodeString(field: 1, string: value)
+            var entry = Data()
+            entry.append(protoEncodeString(field: 1, string: key))
+            entry.append(protoEncodeBytes(field: 2, bytes: valueMsg))
+            out.append(protoEncodeBytes(field: 1, bytes: entry))
+        }
+        return out
+    }
+
+    private static func encodeAntigravityOAuthInfoB64(
+        accessToken: String,
+        refreshToken: String?,
+        expirySeconds: Int
+    ) -> String {
+        var token = Data()
+        token.append(protoEncodeString(field: 1, string: accessToken))
+        token.append(protoEncodeString(field: 2, string: "Bearer"))
+        if let refreshToken, !refreshToken.isEmpty {
+            token.append(protoEncodeString(field: 3, string: refreshToken))
+        }
+        // google.protobuf.Timestamp-like: field 4 message { field 1: seconds }
+        let ts = protoEncodeVarintField(field: 1, value: UInt64(expirySeconds))
+        token.append(protoEncodeBytes(field: 4, bytes: ts))
+        return token.base64EncodedString()
+    }
+
+    // MARK: Minimal protobuf (length-delimited + varint only)
+
+    private struct ProtoField {
+        let field: Int
+        let payload: Data
+    }
+
+    private static func protoParseLengthDelimited(_ data: Data) -> [ProtoField] {
+        var fields: [ProtoField] = []
+        var i = data.startIndex
+        while i < data.endIndex {
+            guard let (key, keyEnd) = protoReadVarint(data, at: i) else { break }
+            i = keyEnd
+            let field = Int(key >> 3)
+            let wire = Int(key & 0x7)
+            guard field > 0, field < 1000 else { break }
+            if wire == 0 {
+                guard let (_, valEnd) = protoReadVarint(data, at: i) else { break }
+                i = valEnd
+            } else if wire == 2 {
+                guard let (len, lenEnd) = protoReadVarint(data, at: i) else { break }
+                i = lenEnd
+                let length = Int(len)
+                guard length >= 0, data.distance(from: i, to: data.endIndex) >= length else { break }
+                let end = data.index(i, offsetBy: length)
+                fields.append(ProtoField(field: field, payload: data[i..<end]))
+                i = end
+            } else if wire == 1 {
+                guard data.distance(from: i, to: data.endIndex) >= 8 else { break }
+                i = data.index(i, offsetBy: 8)
+            } else if wire == 5 {
+                guard data.distance(from: i, to: data.endIndex) >= 4 else { break }
+                i = data.index(i, offsetBy: 4)
+            } else {
+                break
+            }
+        }
+        return fields
+    }
+
+    private static func protoReadVarint(_ data: Data, at start: Data.Index) -> (UInt64, Data.Index)? {
+        var result: UInt64 = 0
+        var shift: UInt64 = 0
+        var i = start
+        while i < data.endIndex {
+            let byte = data[i]
+            i = data.index(after: i)
+            result |= UInt64(byte & 0x7F) << shift
+            if byte & 0x80 == 0 {
+                return (result, i)
+            }
+            shift += 7
+            if shift > 63 { return nil }
+        }
+        return nil
+    }
+
+    private static func protoEncodeVarint(_ value: UInt64) -> Data {
+        var v = value
+        var out = Data()
+        while v > 0x7F {
+            out.append(UInt8((v & 0x7F) | 0x80))
+            v >>= 7
+        }
+        out.append(UInt8(v & 0x7F))
+        return out
+    }
+
+    private static func protoEncodeVarintField(field: Int, value: UInt64) -> Data {
+        var out = protoEncodeVarint(UInt64(field << 3))
+        out.append(protoEncodeVarint(value))
+        return out
+    }
+
+    private static func protoEncodeBytes(field: Int, bytes: Data) -> Data {
+        var out = protoEncodeVarint(UInt64((field << 3) | 2))
+        out.append(protoEncodeVarint(UInt64(bytes.count)))
+        out.append(bytes)
+        return out
+    }
+
+    private static func protoEncodeString(field: Int, string: String) -> Data {
+        protoEncodeBytes(field: field, bytes: Data(string.utf8))
+    }
+
     // MARK: - App restart (quit + relaunch) — Cockpit-style
 
-    /// Kill provider desktop apps (and matching helper processes), then relaunch so they
-    /// re-read native auth. Mirrors Cockpit: close Codex processes → rewrite auth already
-    /// done → start Codex.app again.
-    @MainActor
-    private func restartApps(for type: ServiceType) async -> [String] {
+    private struct AppRestartSpec {
+        let label: String
+        let bundleIDs: [String]
+        let names: [String]
+        let pathFragments: [String]
+        let processNames: [String]
+    }
+
+    private func restartSpec(for type: ServiceType) -> AppRestartSpec? {
         switch type {
         case .codex:
-            // Official desktop + CLI helpers that pin the old account_id in memory.
-            return await killAndRelaunch(
+            return AppRestartSpec(
                 label: "Codex",
                 bundleIDs: ["com.openai.codex", "com.openai.chat"],
                 names: ["Codex", "ChatGPT"],
@@ -510,11 +914,10 @@ final class NativeSessionManager: ObservableObject {
                     "Codex.app/Contents/MacOS/Codex",
                     "ChatGPT.app/Contents/MacOS/ChatGPT",
                 ],
-                // Also force-kill detached CLI sessions so the next `codex` uses new auth.
                 processNames: ["codex"]
             )
         case .claude:
-            return await killAndRelaunch(
+            return AppRestartSpec(
                 label: "Claude",
                 bundleIDs: ["com.anthropic.claudefordesktop", "com.anthropic.claude"],
                 names: ["Claude"],
@@ -522,17 +925,70 @@ final class NativeSessionManager: ObservableObject {
                 processNames: ["claude"]
             )
         case .gemini:
-            // Gemini is mostly CLI; kill long-lived CLI processes if any.
-            return await killAndRelaunch(
+            return AppRestartSpec(
                 label: "Gemini",
                 bundleIDs: [],
                 names: [],
                 pathFragments: [],
                 processNames: ["gemini"]
             )
+        case .antigravity:
+            return AppRestartSpec(
+                label: "Antigravity IDE",
+                bundleIDs: ["com.google.antigravity-ide", "com.google.antigravity"],
+                names: ["Antigravity IDE", "Antigravity"],
+                pathFragments: [
+                    "Antigravity IDE.app/Contents/MacOS",
+                    "Antigravity.app/Contents/MacOS",
+                ],
+                processNames: []
+            )
         default:
-            return []
+            return nil
         }
+    }
+
+    /// Kill provider desktop apps (and matching helper processes), then relaunch so they
+    /// re-read native auth. Mirrors Cockpit: close Codex processes → rewrite auth already
+    /// done → start Codex.app again.
+    @MainActor
+    private func restartApps(for type: ServiceType) async -> [String] {
+        guard let spec = restartSpec(for: type) else { return [] }
+        return await killAndRelaunch(
+            label: spec.label,
+            bundleIDs: spec.bundleIDs,
+            names: spec.names,
+            pathFragments: spec.pathFragments,
+            processNames: spec.processNames
+        )
+    }
+
+    /// Quit only (no relaunch) — used before Antigravity state.vscdb writes.
+    @MainActor
+    private func quitApps(for type: ServiceType) async -> [String] {
+        guard let spec = restartSpec(for: type) else { return [] }
+        return await killAndRelaunch(
+            label: spec.label,
+            bundleIDs: spec.bundleIDs,
+            names: spec.names,
+            pathFragments: spec.pathFragments,
+            processNames: spec.processNames,
+            relaunch: false
+        )
+    }
+
+    /// Relaunch only (no kill) — used after Antigravity was quit + auth written.
+    @MainActor
+    private func relaunchApps(for type: ServiceType) async -> [String] {
+        guard let spec = restartSpec(for: type) else { return [] }
+        return await killAndRelaunch(
+            label: spec.label,
+            bundleIDs: spec.bundleIDs,
+            names: spec.names,
+            pathFragments: spec.pathFragments,
+            processNames: spec.processNames,
+            killRunning: false
+        )
     }
 
     /// Returns human labels of apps that were restarted (or "CLI helpers" if only processes died).
@@ -542,43 +998,54 @@ final class NativeSessionManager: ObservableObject {
         bundleIDs: [String],
         names: [String],
         pathFragments: [String],
-        processNames: [String]
+        processNames: [String],
+        killRunning: Bool = true,
+        relaunch: Bool = true
     ) async -> [String] {
         var relaunchURLs: [URL] = []
         var sawRunning = false
 
-        let apps = NSWorkspace.shared.runningApplications.filter { app in
-            if let bundle = app.bundleIdentifier, bundleIDs.contains(bundle) { return true }
-            if let name = app.localizedName,
-               names.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame })
-            {
-                return true
+        let apps: [NSRunningApplication]
+        if killRunning {
+            apps = NSWorkspace.shared.runningApplications.filter { app in
+                if let bundle = app.bundleIdentifier, bundleIDs.contains(bundle) { return true }
+                if let name = app.localizedName,
+                   names.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame })
+                {
+                    return true
+                }
+                return false
             }
-            return false
-        }
-        for app in apps {
-            sawRunning = true
-            if let url = app.bundleURL { relaunchURLs.append(url) }
-            app.terminate()
+            for app in apps {
+                sawRunning = true
+                if let url = app.bundleURL { relaunchURLs.append(url) }
+                app.terminate()
+            }
+
+            // Path-fragment kill (Cockpit uses pgrep -f "Codex.app/Contents/MacOS/Codex").
+            let pgrepPIDs = Self.pgrepPIDs(pathFragments: pathFragments, processNames: processNames)
+            if !pgrepPIDs.isEmpty {
+                sawRunning = true
+                Self.signalPIDs(pgrepPIDs, sig: SIGTERM)
+            }
+
+            // Wait up to ~6s for graceful quit, then SIGKILL stragglers.
+            for _ in 0..<12 {
+                let stillApps = apps.contains(where: { !$0.isTerminated })
+                let stillPIDs = pgrepPIDs.contains(where: { Self.isPIDAlive($0) })
+                if !stillApps && !stillPIDs { break }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            for app in apps where !app.isTerminated { app.forceTerminate() }
+            let leftover = pgrepPIDs.filter { Self.isPIDAlive($0) }
+            if !leftover.isEmpty { Self.signalPIDs(leftover, sig: SIGKILL) }
+        } else {
+            apps = []
         }
 
-        // Path-fragment kill (Cockpit uses pgrep -f "Codex.app/Contents/MacOS/Codex").
-        let pgrepPIDs = Self.pgrepPIDs(pathFragments: pathFragments, processNames: processNames)
-        if !pgrepPIDs.isEmpty {
-            sawRunning = true
-            Self.signalPIDs(pgrepPIDs, sig: SIGTERM)
+        guard relaunch else {
+            return sawRunning ? ["\(label) processes"] : []
         }
-
-        // Wait up to ~6s for graceful quit, then SIGKILL stragglers.
-        for _ in 0..<12 {
-            let stillApps = apps.contains(where: { !$0.isTerminated })
-            let stillPIDs = pgrepPIDs.contains(where: { Self.isPIDAlive($0) })
-            if !stillApps && !stillPIDs { break }
-            try? await Task.sleep(nanoseconds: 500_000_000)
-        }
-        for app in apps where !app.isTerminated { app.forceTerminate() }
-        let leftover = pgrepPIDs.filter { Self.isPIDAlive($0) }
-        if !leftover.isEmpty { Self.signalPIDs(leftover, sig: SIGKILL) }
 
         // Resolve launch URLs even if the app wasn't running (open from /Applications).
         if relaunchURLs.isEmpty {

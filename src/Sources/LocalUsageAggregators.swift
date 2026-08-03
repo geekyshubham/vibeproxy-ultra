@@ -577,6 +577,27 @@ enum LocalGrokUsage {
 
 enum LocalOpenCodeUsage {
     static func costSnapshot(now: Date = Date(), historyDays: Int = 30) -> ProviderCostSnapshot? {
+        guard let db = openOpenCodeDB() else { return nil }
+        defer { sqlite3_close(db) }
+
+        let cutoffStart = analyticsCutoffStart(now: now, historyDays: historyDays)
+        let todayStart = Calendar.current.startOfDay(for: now)
+        let scale = detectTimestampScale(db: db)
+        let cutoffTs = Int64(cutoffStart.timeIntervalSince1970) * scale
+        let todayStartTs = Int64(todayStart.timeIntervalSince1970) * scale
+
+        // Prefer per-turn `message` rows for BOTH history and today — cumulative `session`
+        // rows dump multi-day lifetime totals into the window whenever a session is touched.
+        if let fromMessages = aggregateFromMessages(db: db, cutoffTs: cutoffTs, todayStartTs: todayStartTs, now: now) {
+            return fromMessages
+        }
+
+        // Older OpenCode DBs without a usable message table: fall back to session totals.
+        return aggregateFromSessions(db: db, cutoffTs: cutoffTs, todayStartTs: todayStartTs, now: now)
+    }
+
+    /// Open read-only connection (URI so WAL readers work while OpenCode is writing).
+    private static func openOpenCodeDB() -> OpaquePointer? {
         let candidates = [
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/opencode/opencode.db"),
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".opencode/opencode.db"),
@@ -584,60 +605,171 @@ enum LocalOpenCodeUsage {
         guard let dbURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
             return nil
         }
-
         var db: OpaquePointer?
-        guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else {
-            return nil
+        let uri = "file:\(dbURL.path)?mode=ro"
+        guard sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK, let db else {
+            sqlite3_close(db)
+            // Fallback: plain path open (some older SQLite builds mishandle file: URIs).
+            var plain: OpaquePointer?
+            guard sqlite3_open_v2(dbURL.path, &plain, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+                sqlite3_close(plain)
+                return nil
+            }
+            return plain
         }
-        defer { sqlite3_close(db) }
+        return db
+    }
 
-        let cutoffStart = analyticsCutoffStart(now: now, historyDays: historyDays)
-        let todayStart = Calendar.current.startOfDay(for: now)
-
-        // OpenCode timestamps are epoch MILLISECONDS on current builds; older DBs used seconds.
-        // Detect the unit once from the max value rather than the old "retry in seconds when
-        // history is empty" heuristic — that heuristic misfired on an idle DB (ms values always
-        // clear a seconds-scaled cutoff) and dumped the entire history into "today".
+    private static func detectTimestampScale(db: OpaquePointer) -> Int64 {
         var maxUpdated: Int64 = 0
         var maxStmt: OpaquePointer?
         if sqlite3_prepare_v2(db, "SELECT MAX(time_updated) FROM session;", -1, &maxStmt, nil) == SQLITE_OK {
             if sqlite3_step(maxStmt) == SQLITE_ROW { maxUpdated = sqlite3_column_int64(maxStmt, 0) }
         }
         sqlite3_finalize(maxStmt)
-        let scale: Int64 = timeUpdatedIsMilliseconds(maxUpdated) ? 1000 : 1
-        let cutoff = Int64(cutoffStart.timeIntervalSince1970) * scale
-        let todayStartTs = Int64(todayStart.timeIntervalSince1970) * scale
+        // Message table may be newer than session on some builds.
+        var msgMax: Int64 = 0
+        var msgStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT MAX(time_created) FROM message;", -1, &msgStmt, nil) == SQLITE_OK {
+            if sqlite3_step(msgStmt) == SQLITE_ROW { msgMax = sqlite3_column_int64(msgStmt, 0) }
+        }
+        sqlite3_finalize(msgStmt)
+        let probe = max(maxUpdated, msgMax)
+        return timeUpdatedIsMilliseconds(probe) ? 1000 : 1
+    }
 
+    private struct TokenBucket {
+        var input = 0
+        var output = 0
+        var cache = 0
+        var total = 0
+        var cost = 0.0
+        var requests = 0
+    }
+
+    private static func aggregateFromMessages(
+        db: OpaquePointer,
+        cutoffTs: Int64,
+        todayStartTs: Int64,
+        now: Date
+    ) -> ProviderCostSnapshot? {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db,
+            "SELECT time_created, data FROM message WHERE time_created >= ?;",
+            -1,
+            &stmt,
+            nil
+        ) == SQLITE_OK, let stmt else {
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, cutoffTs)
+
+        var models: [String: TokenBucket] = [:]
+        var historyTokens = 0
+        var historyCost = 0.0
+        var sessionTokens = 0
+        var sessionCost = 0.0
+        var rows = 0
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let created = sqlite3_column_int64(stmt, 0)
+            guard let c = sqlite3_column_text(stmt, 1),
+                  let data = String(cString: c).data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (json["role"] as? String) == "assistant"
+            else { continue }
+
+            let tk = json["tokens"] as? [String: Any] ?? [:]
+            let cacheBlob = tk["cache"] as? [String: Any] ?? [:]
+            let input = (tk["input"] as? NSNumber)?.intValue ?? 0
+            let output = (tk["output"] as? NSNumber)?.intValue ?? 0
+            let reasoning = (tk["reasoning"] as? NSNumber)?.intValue ?? 0
+            let cacheRead = (cacheBlob["read"] as? NSNumber)?.intValue ?? 0
+            let storedCost = (json["cost"] as? NSNumber)?.doubleValue ?? 0
+            let total = input + output + reasoning + cacheRead
+            guard total > 0 || storedCost > 0 else { continue }
+
+            let model = messageModelID(json) ?? "opencode"
+            let cost = storedCost > 0
+                ? storedCost
+                : TokenPricingCatalog.estimateUSD(
+                    model: model,
+                    inputTokens: input,
+                    outputTokens: output + reasoning,
+                    cacheReadTokens: cacheRead
+                )
+
+            var bucket = models[model] ?? TokenBucket()
+            bucket.input += input
+            bucket.output += output + reasoning
+            bucket.cache += cacheRead
+            bucket.total += total
+            bucket.cost += cost
+            bucket.requests += 1
+            models[model] = bucket
+
+            historyTokens += total
+            historyCost += cost
+            if created >= todayStartTs {
+                sessionTokens += total
+                sessionCost += cost
+            }
+            rows += 1
+        }
+
+        guard rows > 0, historyTokens > 0 || historyCost > 0 else { return nil }
+
+        let modelRows = models.map { name, b in
+            ModelTokenUsage(
+                model: name,
+                inputTokens: b.input,
+                outputTokens: b.output,
+                cacheReadTokens: b.cache,
+                totalTokens: b.total,
+                estimatedCostUSD: b.cost,
+                requestCount: b.requests
+            )
+        }
+        .sorted { $0.totalTokens > $1.totalTokens }
+
+        return ProviderCostSnapshot.make(
+            providerID: "opencode",
+            sessionTokens: sessionTokens,
+            sessionCostUSD: sessionCost,
+            last30DaysTokens: historyTokens,
+            last30DaysCostUSD: historyCost,
+            models: modelRows,
+            updatedAt: now
+        )
+    }
+
+    private static func aggregateFromSessions(
+        db: OpaquePointer,
+        cutoffTs: Int64,
+        todayStartTs: Int64,
+        now: Date
+    ) -> ProviderCostSnapshot? {
         let sql = """
         SELECT model, tokens_input, tokens_output, tokens_cache_read, tokens_reasoning,
                cost, time_updated
         FROM session
         WHERE time_updated >= ?;
         """
-
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
             return nil
         }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int64(stmt, 1, cutoff)
+        sqlite3_bind_int64(stmt, 1, cutoffTs)
 
-        struct Bucket {
-            var input = 0
-            var output = 0
-            var cache = 0
-            var total = 0
-            var cost = 0.0
-            var requests = 0
-        }
-        var models: [String: Bucket] = [:]
+        var models: [String: TokenBucket] = [:]
         var historyTokens = 0
         var historyCost = 0.0
 
-        // 30-day history + per-model breakdown come from the cumulative `session` row.
         while sqlite3_step(stmt) == SQLITE_ROW {
             let modelRaw = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? "{}"
-            // OpenCode stores `{"id":"glm-5.2","providerID":"opencode-go"}` - price by id.
             let model = TokenPricingCatalog.normalizeModelID(parseOpenCodeModel(modelRaw))
                 ?? parseOpenCodeModel(modelRaw)
             let input = Int(sqlite3_column_int64(stmt, 1))
@@ -645,11 +777,9 @@ enum LocalOpenCodeUsage {
             let cache = Int(sqlite3_column_int64(stmt, 3))
             let reasoning = Int(sqlite3_column_int64(stmt, 4))
             let storedCost = sqlite3_column_double(stmt, 5)
-
             let total = input + output + cache + reasoning
             guard total > 0 || storedCost > 0 else { continue }
 
-            // Prefer OpenCode's own cost when > 0 (already model-aware); else list-price by model id.
             let cost = storedCost > 0
                 ? storedCost
                 : TokenPricingCatalog.estimateUSD(
@@ -659,7 +789,7 @@ enum LocalOpenCodeUsage {
                     cacheReadTokens: cache
                 )
 
-            var bucket = models[model] ?? Bucket()
+            var bucket = models[model] ?? TokenBucket()
             bucket.input += input
             bucket.output += output + reasoning
             bucket.cache += cache
@@ -667,16 +797,11 @@ enum LocalOpenCodeUsage {
             bucket.cost += cost
             bucket.requests += 1
             models[model] = bucket
-
             historyTokens += total
             historyCost += cost
         }
 
-        // "Today" must come from the per-turn `message` table, not the cumulative session row:
-        // a resumed/multi-day session touched today would otherwise dump its whole lifetime
-        // total into today's bucket. Falls back to (0,0) on older DBs with no `message` table.
         let (sessionTokens, sessionCost) = openCodeTodayTotals(db: db, todayStartTs: todayStartTs)
-
         guard historyTokens > 0 || historyCost > 0 else { return nil }
 
         let modelRows = models.map { name, b in
@@ -718,30 +843,10 @@ enum LocalOpenCodeUsage {
         now: Date = Date(),
         historyDays: Int = 30
     ) -> [UsageDayKey: DailyProviderUsage] {
-        let candidates = [
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/opencode/opencode.db"),
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".opencode/opencode.db"),
-        ]
-        guard let dbURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
-            return [:]
-        }
-
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else {
-            return [:]
-        }
+        guard let db = openOpenCodeDB() else { return [:] }
         defer { sqlite3_close(db) }
 
-        // Unit detection mirrors costSnapshot: probe the session table's max, because an
-        // idle DB would otherwise let millisecond values clear a seconds-scaled cutoff.
-        var maxUpdated: Int64 = 0
-        var maxStmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT MAX(time_updated) FROM session;", -1, &maxStmt, nil) == SQLITE_OK {
-            if sqlite3_step(maxStmt) == SQLITE_ROW { maxUpdated = sqlite3_column_int64(maxStmt, 0) }
-        }
-        sqlite3_finalize(maxStmt)
-        let scale: Int64 = timeUpdatedIsMilliseconds(maxUpdated) ? 1000 : 1
-
+        let scale = detectTimestampScale(db: db)
         let cutoffStart = analyticsCutoffStart(now: now, historyDays: historyDays)
         let cutoffTs = Int64(cutoffStart.timeIntervalSince1970) * scale
 
@@ -910,6 +1015,359 @@ enum LocalOpenCodeUsage {
             cost += (json["cost"] as? NSNumber)?.doubleValue ?? 0
         }
         return (tokens, cost)
+    }
+}
+
+// MARK: - Antigravity IDE (conversation DBs under ~/.gemini/antigravity-ide)
+
+/// Reads per-generation usage from Antigravity IDE `conversations/*.db` `gen_metadata`
+/// blobs (protobuf). Token fields are recovered from the same wire layout Cockpit-era
+/// clients write — not from the empty `~/.antigravity` tree the generic scanner used.
+enum LocalAntigravityUsage {
+    private static let modelPattern = try! NSRegularExpression(
+        pattern: #"^(gemini|claude|gpt)-[\w.\-]+"#,
+        options: [.caseInsensitive]
+    )
+
+    static func costSnapshot(now: Date = Date(), historyDays: Int = 30) -> ProviderCostSnapshot? {
+        let byDay = aggregateByDay(now: now, historyDays: historyDays)
+        guard !byDay.isEmpty else { return nil }
+
+        let today = dayKey(for: now)
+        var models: [String: (input: Int, output: Int, requests: Int, cost: Double)] = [:]
+        var historyTokens = 0
+        var historyCost = 0.0
+        var sessionTokens = 0
+        var sessionCost = 0.0
+
+        for (day, dayModels) in byDay {
+            for (model, bucket) in dayModels {
+                var acc = models[model] ?? (0, 0, 0, 0)
+                acc.input += bucket.input
+                acc.output += bucket.output
+                acc.requests += bucket.requests
+                acc.cost += bucket.cost
+                models[model] = acc
+                let total = bucket.input + bucket.output
+                historyTokens += total
+                historyCost += bucket.cost
+                if day == today {
+                    sessionTokens += total
+                    sessionCost += bucket.cost
+                }
+            }
+        }
+
+        guard historyTokens > 0 || historyCost > 0 else { return nil }
+
+        let modelRows = models.map { name, b in
+            ModelTokenUsage(
+                model: name,
+                inputTokens: b.input,
+                outputTokens: b.output,
+                cacheReadTokens: 0,
+                totalTokens: b.input + b.output,
+                estimatedCostUSD: b.cost,
+                requestCount: b.requests
+            )
+        }
+        .sorted { $0.totalTokens > $1.totalTokens }
+
+        return ProviderCostSnapshot.make(
+            providerID: "antigravity",
+            sessionTokens: sessionTokens,
+            sessionCostUSD: sessionCost,
+            last30DaysTokens: historyTokens,
+            last30DaysCostUSD: historyCost,
+            models: modelRows,
+            updatedAt: now
+        )
+    }
+
+    static func dailyUsage(
+        now: Date = Date(),
+        historyDays: Int = 30
+    ) -> [UsageDayKey: DailyProviderUsage] {
+        let byDay = aggregateByDay(now: now, historyDays: historyDays)
+        var result: [UsageDayKey: DailyProviderUsage] = [:]
+        for (day, models) in byDay {
+            let rows = models.map { name, b in
+                DailyModelUsage(
+                    model: name,
+                    inputTokens: b.input,
+                    outputTokens: b.output,
+                    cacheReadTokens: 0,
+                    totalVolume: b.input + b.output,
+                    estimatedCostUSD: b.cost,
+                    requestCount: b.requests,
+                    volumeUnit: .tokens
+                )
+            }
+            .sorted { $0.totalVolume > $1.totalVolume }
+            guard !rows.isEmpty else { continue }
+            result[UsageDayKey(epoch: day)] = DailyProviderUsage(
+                providerID: "antigravity",
+                models: rows,
+                volumeUnit: .tokens,
+                // Protobuf field recovery is best-effort; mark as estimated so UI caveats apply.
+                fidelity: .sessionApproximate
+            )
+        }
+        return result
+    }
+
+    private struct StepBucket {
+        var input = 0
+        var output = 0
+        var requests = 0
+        var cost = 0.0
+    }
+
+    private static func aggregateByDay(
+        now: Date,
+        historyDays: Int
+    ) -> [Int: [String: StepBucket]] {
+        let roots = conversationRoots()
+        guard !roots.isEmpty else { return [:] }
+
+        let cutoffStart = analyticsCutoffStart(now: now, historyDays: historyDays)
+        let cutoffEpoch = cutoffStart.timeIntervalSince1970
+        var result: [Int: [String: StepBucket]] = [:]
+
+        for root in roots {
+            guard let files = try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for url in files where url.pathExtension.lowercased() == "db" {
+                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+                      let mtime = values.contentModificationDate
+                else { continue }
+                // Skip DBs last touched before the window (conversations are append-mostly).
+                guard mtime >= cutoffStart else { continue }
+                let fallbackDay = dayKey(for: mtime)
+                scanConversationDB(
+                    at: url,
+                    cutoffEpoch: cutoffEpoch,
+                    fallbackDay: fallbackDay,
+                    into: &result
+                )
+            }
+        }
+        return result
+    }
+
+    private static func conversationRoots() -> [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let candidates = [
+            home.appendingPathComponent(".gemini/antigravity-ide/conversations"),
+            home.appendingPathComponent(".antigravity-ide/conversations"),
+            home.appendingPathComponent(".antigravity/conversations"),
+        ]
+        return candidates.filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private static func scanConversationDB(
+        at url: URL,
+        cutoffEpoch: TimeInterval,
+        fallbackDay: Int,
+        into result: inout [Int: [String: StepBucket]]
+    ) {
+        var db: OpaquePointer?
+        let uri = "file:\(url.path)?mode=ro"
+        let opened = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK
+            || sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK
+        guard opened, let db else {
+            sqlite3_close(db)
+            return
+        }
+        defer { sqlite3_close(db) }
+
+        var stmt: OpaquePointer?
+        // size column filters out full-trajectory dumps (multi-MB) that restate prior steps.
+        guard sqlite3_prepare_v2(
+            db,
+            "SELECT size, data FROM gen_metadata WHERE size IS NULL OR size < 8000;",
+            -1,
+            &stmt,
+            nil
+        ) == SQLITE_OK, let stmt else {
+            return
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let size = Int(sqlite3_column_int64(stmt, 0))
+            guard size == 0 || size < 8000 else { continue }
+            guard let blob = sqlite3_column_blob(stmt, 1) else { continue }
+            let nbytes = Int(sqlite3_column_bytes(stmt, 1))
+            guard nbytes > 20 else { continue }
+            let data = Data(bytes: blob, count: nbytes)
+            guard let step = extractStep(from: data) else { continue }
+            if let ts = step.timestamp, ts < cutoffEpoch { continue }
+            let day = step.timestamp.map { dayKey(for: Date(timeIntervalSince1970: $0)) } ?? fallbackDay
+            let model = TokenPricingCatalog.normalizeModelID(step.model) ?? step.model
+            let cost = TokenPricingCatalog.estimateUSD(
+                model: model,
+                inputTokens: step.input,
+                outputTokens: step.output,
+                cacheReadTokens: 0
+            )
+            var dayMap = result[day] ?? [:]
+            var bucket = dayMap[model] ?? StepBucket()
+            bucket.input += step.input
+            bucket.output += step.output
+            bucket.requests += 1
+            bucket.cost += cost
+            dayMap[model] = bucket
+            result[day] = dayMap
+        }
+    }
+
+    private struct StepUsage {
+        let model: String
+        let input: Int
+        let output: Int
+        let timestamp: TimeInterval?
+    }
+
+    /// Recover model + input/output from a gen_metadata protobuf blob.
+    /// Output prefers field pairs where depth-2 f3 == f10 (completion tokens); input is the
+    /// first reasonable depth-2 f2 that is not a known budget constant.
+    private static func extractStep(from data: Data) -> StepUsage? {
+        let fields = protoWalk(data, maxDepth: 3)
+        var model: String?
+        for field in fields where field.kind == .string {
+            let s = field.stringValue
+            let range = NSRange(s.startIndex..., in: s)
+            if modelPattern.firstMatch(in: s, range: range) != nil {
+                model = s
+                break
+            }
+        }
+        guard let model else { return nil }
+
+        var f2: [Int] = []
+        var f3: [Int] = []
+        var f10: [Int] = []
+        var timestamps: [TimeInterval] = []
+        let budgets: Set<Int> = [200, 512, 1000, 1024, 4096, 8192, 10_000, 40_000, 64_000, 200_000]
+
+        for field in fields where field.kind == .varint {
+            let v = Int(field.varintValue)
+            if field.depth == 2, field.number == 2, (1...500_000).contains(v) { f2.append(v) }
+            if field.depth == 2, field.number == 3, (1...64_000).contains(v) { f3.append(v) }
+            if field.depth == 2, field.number == 10, (1...64_000).contains(v) { f10.append(v) }
+            // Unix seconds in the 2023–2033 band.
+            if (1_700_000_000...2_000_000_000).contains(field.varintValue) {
+                timestamps.append(TimeInterval(field.varintValue))
+            }
+        }
+
+        let f10set = Set(f10)
+        var output: Int?
+        for candidate in f3 where f10set.contains(candidate) {
+            output = candidate
+            break
+        }
+        if output == nil {
+            let small = f3.filter { $0 < 32_000 }
+            output = small.min()
+        }
+
+        var input: Int?
+        for candidate in f2 where !budgets.contains(candidate) && candidate >= 10 {
+            input = candidate
+            break
+        }
+
+        let inTok = input ?? 0
+        let outTok = output ?? 0
+        guard inTok > 0 || outTok > 0 else { return nil }
+        return StepUsage(
+            model: model,
+            input: inTok,
+            output: outTok,
+            timestamp: timestamps.first
+        )
+    }
+
+    private enum ProtoKind { case varint, string }
+    private struct ProtoField {
+        let depth: Int
+        let number: Int
+        let kind: ProtoKind
+        let varintValue: UInt64
+        let stringValue: String
+    }
+
+    private static func protoWalk(_ data: Data, maxDepth: Int) -> [ProtoField] {
+        var out: [ProtoField] = []
+        func walk(_ data: Data, depth: Int) {
+            guard depth <= maxDepth else { return }
+            var i = data.startIndex
+            while i < data.endIndex {
+                guard let (key, keyEnd) = readVarint(data, at: i) else { break }
+                i = keyEnd
+                let field = Int(key >> 3)
+                let wire = Int(key & 0x7)
+                guard field > 0, field < 200 else { break }
+                if wire == 0 {
+                    guard let (val, valEnd) = readVarint(data, at: i) else { break }
+                    i = valEnd
+                    out.append(ProtoField(depth: depth, number: field, kind: .varint, varintValue: val, stringValue: ""))
+                } else if wire == 2 {
+                    guard let (len, lenEnd) = readVarint(data, at: i) else { break }
+                    i = lenEnd
+                    let n = Int(len)
+                    guard n >= 0, data.distance(from: i, to: data.endIndex) >= n else { break }
+                    let end = data.index(i, offsetBy: n)
+                    let payload = data[i..<end]
+                    i = end
+                    if let s = String(data: payload, encoding: .utf8),
+                       s.count >= 4, s.count < 200,
+                       !s.unicodeScalars.contains(where: {
+                           CharacterSet.controlCharacters.contains($0)
+                               && !CharacterSet.whitespacesAndNewlines.contains($0)
+                       })
+                    {
+                        out.append(ProtoField(depth: depth, number: field, kind: .string, varintValue: 0, stringValue: s))
+                    }
+                    walk(Data(payload), depth: depth + 1)
+                } else if wire == 1 {
+                    guard data.distance(from: i, to: data.endIndex) >= 8 else { break }
+                    i = data.index(i, offsetBy: 8)
+                } else if wire == 5 {
+                    guard data.distance(from: i, to: data.endIndex) >= 4 else { break }
+                    i = data.index(i, offsetBy: 4)
+                } else {
+                    break
+                }
+            }
+        }
+        walk(data, depth: 0)
+        return out
+    }
+
+    private static func readVarint(_ data: Data, at start: Data.Index) -> (UInt64, Data.Index)? {
+        var result: UInt64 = 0
+        var shift: UInt64 = 0
+        var i = start
+        while i < data.endIndex {
+            let byte = data[i]
+            i = data.index(after: i)
+            result |= UInt64(byte & 0x7F) << shift
+            if byte & 0x80 == 0 { return (result, i) }
+            shift += 7
+            if shift > 63 { return nil }
+        }
+        return nil
+    }
+
+    private static func dayKey(for date: Date) -> Int {
+        Int(Calendar.current.startOfDay(for: date).timeIntervalSince1970)
     }
 }
 

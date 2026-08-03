@@ -74,7 +74,8 @@ struct AnalyticsDashboardView: View {
             Text("By provider")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            ForEach(overview.byProvider.prefix(compact ? 4 : 12)) { provider in
+            // Compact menu bar used to hide OpenCode/Antigravity behind a 4-row cap.
+            ForEach(overview.byProvider.prefix(compact ? 8 : 14)) { provider in
                 providerRow(provider, overview: overview)
             }
         }
@@ -140,6 +141,8 @@ struct AnalyticsDashboardView: View {
         case "copilot": return MenuBarDesign.providerTint(for: .copilot)
         case "antigravity": return MenuBarDesign.providerTint(for: .antigravity)
         case "kiro": return MenuBarDesign.providerTint(for: .kiro)
+        case "grok": return MenuBarDesign.providerTint(for: .grok)
+        case "opencode", "opencode-go": return Color(red: 0.95, green: 0.55, blue: 0.20)
         case "zai", "z.ai": return MenuBarDesign.providerTint(for: .zai)
         case "kimi": return MenuBarDesign.providerTint(for: .kimi)
         case "qwen": return MenuBarDesign.providerTint(for: .qwen)

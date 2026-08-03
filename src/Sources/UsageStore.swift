@@ -43,6 +43,8 @@ final class UsageStore: ObservableObject {
             ".kiro/sessions/cli", ".grok/sessions", ".copilot/jb",
             ".claude/projects", ".codex/sessions", ".gemini/tmp",
             ".local/share/opencode", ".opencode",
+            ".gemini/antigravity-ide/conversations",
+            ".gemini/antigravity-ide/brain",
         ]
         let fm = FileManager.default
         var newest: Date?
