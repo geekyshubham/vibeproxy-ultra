@@ -596,7 +596,8 @@ enum LocalOpenCodeUsage {
         return aggregateFromSessions(db: db, cutoffTs: cutoffTs, todayStartTs: todayStartTs, now: now)
     }
 
-    /// Open read-only connection (URI so WAL readers work while OpenCode is writing).
+    /// Open read-only connection. Prefer plain path open — more reliable than URI mode
+    /// across SQLite builds while OpenCode holds a WAL writer.
     private static func openOpenCodeDB() -> OpaquePointer? {
         let candidates = [
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/opencode/opencode.db"),
@@ -606,18 +607,15 @@ enum LocalOpenCodeUsage {
             return nil
         }
         var db: OpaquePointer?
-        let uri = "file:\(dbURL.path)?mode=ro"
-        guard sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK, let db else {
-            sqlite3_close(db)
-            // Fallback: plain path open (some older SQLite builds mishandle file: URIs).
-            var plain: OpaquePointer?
-            guard sqlite3_open_v2(dbURL.path, &plain, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
-                sqlite3_close(plain)
-                return nil
-            }
-            return plain
+        // SQLITE_OPEN_FULLMUTEX: safe if OpenCode is mid-write on the WAL.
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(dbURL.path, &db, flags, nil) == SQLITE_OK, let db {
+            // Best-effort: don't fail the whole analytics pass if a busy timeout can't be set.
+            sqlite3_busy_timeout(db, 1500)
+            return db
         }
-        return db
+        sqlite3_close(db)
+        return nil
     }
 
     private static func detectTimestampScale(db: OpaquePointer) -> Int64 {
@@ -1176,26 +1174,29 @@ enum LocalAntigravityUsage {
         into result: inout [Int: [String: StepBucket]]
     ) {
         var db: OpaquePointer?
-        let uri = "file:\(url.path)?mode=ro"
-        let opened = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK
-            || sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK
-        guard opened, let db else {
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        guard sqlite3_open_v2(url.path, &db, flags, nil) == SQLITE_OK, let db else {
             sqlite3_close(db)
             return
         }
         defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 1000)
 
-        var stmt: OpaquePointer?
         // size column filters out full-trajectory dumps (multi-MB) that restate prior steps.
-        guard sqlite3_prepare_v2(
-            db,
+        // Fall back to unfiltered SELECT if the size column is missing on older DBs.
+        let sqlCandidates = [
             "SELECT size, data FROM gen_metadata WHERE size IS NULL OR size < 8000;",
-            -1,
-            &stmt,
-            nil
-        ) == SQLITE_OK, let stmt else {
-            return
+            "SELECT length(data), data FROM gen_metadata;",
+        ]
+        var prepared: OpaquePointer?
+        for sql in sqlCandidates {
+            if sqlite3_prepare_v2(db, sql, -1, &prepared, nil) == SQLITE_OK, prepared != nil {
+                break
+            }
+            sqlite3_finalize(prepared)
+            prepared = nil
         }
+        guard let stmt = prepared else { return }
         defer { sqlite3_finalize(stmt) }
 
         while sqlite3_step(stmt) == SQLITE_ROW {

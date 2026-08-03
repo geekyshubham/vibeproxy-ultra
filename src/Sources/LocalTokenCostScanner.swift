@@ -134,46 +134,55 @@ enum LocalTokenCostScanner {
         // Copilot has no generic-tree fallback here (unlike allProviderSnapshots): the
         // generic scan buckets by file mtime, which would pin an append-only transcript's
         // whole history onto the day it was last reopened.
-        let specialized = [
-            LocalKiroCredits.dailyUsage(now: now, historyDays: historyDays),
-            LocalOpenCodeUsage.dailyUsage(now: now, historyDays: historyDays),
-            LocalAntigravityUsage.dailyUsage(now: now, historyDays: historyDays),
-            LocalGrokUsage.dailyUsage(now: now, historyDays: historyDays),
-            LocalCopilotUsage.dailyUsage(now: now, historyDays: historyDays),
+        let specialized: [() -> [UsageDayKey: DailyProviderUsage]] = [
+            { LocalKiroCredits.dailyUsage(now: now, historyDays: historyDays) },
+            { LocalOpenCodeUsage.dailyUsage(now: now, historyDays: historyDays) },
+            { LocalAntigravityUsage.dailyUsage(now: now, historyDays: historyDays) },
+            { LocalGrokUsage.dailyUsage(now: now, historyDays: historyDays) },
+            { LocalCopilotUsage.dailyUsage(now: now, historyDays: historyDays) },
         ]
-        results.append(contentsOf: specialized.filter { !$0.isEmpty })
+        for block in specialized {
+            autoreleasepool {
+                let daily = block()
+                if !daily.isEmpty { results.append(daily) }
+            }
+        }
 
         return results
     }
 
     /// All providers with local logs we know how to scan.
+    ///
+    /// Each provider is isolated so one bad tree/DB cannot blank the whole Analytics tab.
     static func allProviderSnapshots(now: Date = Date(), historyDays: Int = 30) -> [ProviderCostSnapshot] {
         var results: [ProviderCostSnapshot] = []
 
+        func take(_ label: String, _ body: () -> ProviderCostSnapshot?) {
+            // autoreleasepool keeps transient JSON/SQLite buffers from accumulating across providers.
+            autoreleasepool {
+                if let snap = body() {
+                    results.append(snap)
+                } else {
+                    NSLog("[UsageScan] %@ produced no snapshot", label)
+                }
+            }
+        }
+
         // Classic CLI jsonl trees (Antigravity uses LocalAntigravityUsage below).
-        let jsonlTypes: [ServiceType] = [.codex, .claude, .gemini]
-        results.append(contentsOf: jsonlTypes.compactMap { snapshot(for: $0, now: now, historyDays: historyDays) })
-
-        // Specialized aggregators (Kiro, Grok, OpenCode, Antigravity IDE, Copilot)
-        if let kiro = LocalKiroCredits.costSnapshot(now: now, historyDays: historyDays) {
-            results.append(kiro)
-        }
-        if let grok = LocalGrokUsage.costSnapshot(now: now, historyDays: historyDays) {
-            results.append(grok)
-        }
-        if let opencode = LocalOpenCodeUsage.costSnapshot(now: now, historyDays: historyDays) {
-            results.append(opencode)
-        }
-        if let antigravity = LocalAntigravityUsage.costSnapshot(now: now, historyDays: historyDays) {
-            results.append(antigravity)
-        }
-        // Prefer specialized Copilot estimate when present; else fall back to generic tree scan.
-        if let copilot = LocalCopilotUsage.costSnapshot(now: now, historyDays: historyDays) {
-            results.append(copilot)
-        } else if let copilot = snapshot(for: .copilot, now: now, historyDays: historyDays) {
-            results.append(copilot)
+        for type in [ServiceType.codex, .claude, .gemini] {
+            take(type.rawValue) { snapshot(for: type, now: now, historyDays: historyDays) }
         }
 
+        take("kiro") { LocalKiroCredits.costSnapshot(now: now, historyDays: historyDays) }
+        take("grok") { LocalGrokUsage.costSnapshot(now: now, historyDays: historyDays) }
+        take("opencode") { LocalOpenCodeUsage.costSnapshot(now: now, historyDays: historyDays) }
+        take("antigravity") { LocalAntigravityUsage.costSnapshot(now: now, historyDays: historyDays) }
+        take("copilot") {
+            LocalCopilotUsage.costSnapshot(now: now, historyDays: historyDays)
+                ?? snapshot(for: .copilot, now: now, historyDays: historyDays)
+        }
+
+        NSLog("[UsageScan] snapshots=%d providers=%@", results.count, results.map(\.providerID).joined(separator: ","))
         return results
     }
 
@@ -222,13 +231,10 @@ enum LocalTokenCostScanner {
                 home.appendingPathComponent(".config/github-copilot"),
             ])
         case .antigravity:
-            // Prefer LocalAntigravityUsage (conversation DBs). Keep brain transcripts as a
-            // secondary jsonl path for older installs; never scan whole ~/.gemini (Gemini CLI).
-            return ScanRoots(providerID: "antigravity", directories: [
-                home.appendingPathComponent(".gemini/antigravity-ide/brain"),
-                home.appendingPathComponent(".gemini/antigravity-ide/conversations"),
-                home.appendingPathComponent(".antigravity"),
-            ])
+            // Token costs come from LocalAntigravityUsage (conversation DBs). Do not point the
+            // generic jsonl walker at brain/ (51MB+ of transcripts without usage fields) — that
+            // only burns CPU and used to make Analytics look stuck/empty.
+            return ScanRoots(providerID: "antigravity", directories: [])
         default:
             return ScanRoots(providerID: serviceType.usageProviderID ?? serviceType.rawValue, directories: [])
         }

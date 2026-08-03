@@ -76,6 +76,11 @@ struct MenuBarPanelView: View {
             authManager.checkAuthStatus()
             nativeSession.refresh(accounts: authManager.serviceAccounts.mapValues { $0.accounts })
             Task {
+                // Force a local cost rescan when Analytics is empty so a failed prior pass
+                // (or launching a stale app binary) does not stick on "No local usage history".
+                if usageStore.analytics == nil {
+                    usageStore.invalidateCostScanThrottle()
+                }
                 await usageStore.refreshVisibleProviders(
                     from: ServiceType.allCases,
                     accounts: authManager.serviceAccounts.mapValues { $0.accounts }

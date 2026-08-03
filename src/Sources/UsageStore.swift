@@ -33,6 +33,11 @@ final class UsageStore: ObservableObject {
     private var lastCostScanAt: Date?
     private let costScanMinInterval: TimeInterval = 15 * 60
 
+    /// Drop the cost-scan throttle so the next refresh re-reads local CLI logs.
+    func invalidateCostScanThrottle() {
+        lastCostScanAt = nil
+    }
+
     /// Cheap freshness probe: newest mtime among local-usage roots *and one level of
     /// children*. Nested trees (e.g. `~/.grok/sessions/<project>/<id>/signals.json`) do not
     /// always bump the grandparent dir mtime, so a root-only probe missed Grok/Kiro flushes.
@@ -265,29 +270,40 @@ final class UsageStore: ObservableObject {
                 // Keep list-prices current (daily TTL; no-op when fresh or disabled) before pricing the scan.
                 await RemotePricingCatalog.refreshIfStale()
                 let historyDays = await MainActor.run { AppSettings.shared.analyticsHistoryDays }
-                // Roll-ups and per-day detail come from the same detached pass. The second
-                // call re-walks the same trees but hits LocalTokenCostScanner's per-file
-                // cache (keyed by path+mtime+size), so it re-parses nothing — only the
-                // directory enumeration repeats.
-                let scan = await Task.detached(priority: .utility) {
-                    (
-                        costs: LocalTokenCostScanner.allProviderSnapshots(historyDays: historyDays),
-                        daily: LocalTokenCostScanner.allProviderDailyUsage(historyDays: historyDays)
-                    )
+                // Snapshots first (what Analytics shows), then daily detail. Never let a daily
+                // pass failure wipe the overview — that was blanking the Analytics tab entirely.
+                let costs = await Task.detached(priority: .utility) {
+                    LocalTokenCostScanner.allProviderSnapshots(historyDays: historyDays)
                 }.value
                 guard !Task.isCancelled else { return }
 
-                // Persist per-day history before publishing, so a day stays queryable long
-                // after its log files age past the scanner's mtime cutoff.
-                UsageDailyStore.record(providers: scan.daily)
-
                 await MainActor.run {
                     guard generation == self.refreshGeneration else { return }
-                    for cost in scan.costs {
+                    // Replace local scan providers so stale zeros don't stick after a good rescan.
+                    let localIDs: Set<String> = [
+                        "codex", "claude", "gemini", "antigravity",
+                        "kiro", "grok", "opencode", "copilot",
+                    ]
+                    for id in localIDs { self.costByProvider.removeValue(forKey: id) }
+                    for cost in costs {
                         self.costByProvider[cost.providerID] = cost
                     }
                     self.analytics = AnalyticsEngine.overview(from: Array(self.costByProvider.values))
                     self.lastCostScanAt = Date()
+                    NSLog(
+                        "[UsageStore] analytics providers=%d tokens30d=%d",
+                        costs.count,
+                        self.analytics?.totalTokens30d ?? -1
+                    )
+                }
+
+                let daily = await Task.detached(priority: .utility) {
+                    LocalTokenCostScanner.allProviderDailyUsage(historyDays: historyDays)
+                }.value
+                guard !Task.isCancelled else { return }
+                UsageDailyStore.record(providers: daily)
+                await MainActor.run {
+                    guard generation == self.refreshGeneration else { return }
                     self.refreshDailySummary()
                 }
             }
