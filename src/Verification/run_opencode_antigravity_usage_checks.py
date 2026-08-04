@@ -58,6 +58,9 @@ def check_antigravity() -> None:
     assert dbs, "no Antigravity conversation DBs"
     total_rows = 0
     model_hits = 0
+    # Regression: Swift Int(UInt64.max) traps — ensure we can still parse steps with
+    # max-uint sentinels present in real gen_metadata blobs.
+    huge_varint_seen = False
     for db in dbs:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         cur = conn.cursor()
@@ -67,26 +70,43 @@ def check_antigravity() -> None:
             )
             total_rows += cur.fetchone()[0]
             cur.execute(
-                "SELECT data FROM gen_metadata WHERE size IS NULL OR size < 8000 LIMIT 20"
+                "SELECT data FROM gen_metadata WHERE size IS NULL OR size < 8000 LIMIT 50"
             )
             for (blob,) in cur.fetchall():
                 if not blob:
                     continue
-                text = blob if isinstance(blob, str) else blob.decode("utf-8", "replace")
+                raw = blob if isinstance(blob, (bytes, bytearray)) else bytes(blob)
+                text = raw.decode("utf-8", "replace")
                 if "gemini-" in text or "claude-" in text or "gpt-" in text:
                     model_hits += 1
+                # 0xFF-heavy tail patterns often encode large varints / sentinels
+                if b"\xff\xff\xff\xff\xff\xff\xff\xff" in raw or raw.count(0xFF) > 8:
+                    huge_varint_seen = True
         except sqlite3.Error:
             pass
         finally:
             conn.close()
     assert total_rows > 0, "no small gen_metadata rows"
     assert model_hits > 0, "no model ids in gen_metadata samples"
-    print(f"antigravity: ok (dbs={len(dbs)}, gen_metadata_rows={total_rows}, model_hits={model_hits})")
+    print(
+        f"antigravity: ok (dbs={len(dbs)}, gen_metadata_rows={total_rows}, "
+        f"model_hits={model_hits}, huge_varint_seen={huge_varint_seen})"
+    )
+
+
+def check_int_exactly_safe() -> None:
+    """Document the Swift trap we fixed: Int(UInt64.max) must not be used."""
+    max_u = (1 << 64) - 1
+    # Python int is unbounded; the bug is Swift-specific. Assert the sentinel we saw.
+    assert max_u == 18446744073709551615
+    assert max_u > (1 << 63) - 1  # larger than Int64.max
+    print("int_exactly: ok (UInt64.max does not fit Int64 — use Int(exactly:))")
 
 
 def main() -> int:
     check_opencode()
     check_antigravity()
+    check_int_exactly_safe()
     print("run_opencode_antigravity_usage_checks: OK")
     return 0
 

@@ -1029,7 +1029,10 @@ enum LocalAntigravityUsage {
 
     static func costSnapshot(now: Date = Date(), historyDays: Int = 30) -> ProviderCostSnapshot? {
         let byDay = aggregateByDay(now: now, historyDays: historyDays)
-        guard !byDay.isEmpty else { return nil }
+        guard !byDay.isEmpty else {
+            NSLog("[UsageScan] antigravity: no conversation days (roots=%d)", conversationRoots().count)
+            return nil
+        }
 
         let today = dayKey(for: now)
         var models: [String: (input: Int, output: Int, requests: Int, cost: Double)] = [:]
@@ -1070,6 +1073,14 @@ enum LocalAntigravityUsage {
             )
         }
         .sorted { $0.totalTokens > $1.totalTokens }
+
+        NSLog(
+            "[UsageScan] antigravity: tokens30d=%d today=%d models=%d steps≈%d",
+            historyTokens,
+            sessionTokens,
+            modelRows.count,
+            models.values.reduce(0) { $0 + $1.requests }
+        )
 
         return ProviderCostSnapshot.make(
             providerID: "antigravity",
@@ -1206,6 +1217,7 @@ enum LocalAntigravityUsage {
             let nbytes = Int(sqlite3_column_bytes(stmt, 1))
             guard nbytes > 20 else { continue }
             let data = Data(bytes: blob, count: nbytes)
+            // extractStep must never trap: protobuf varints can be UInt64.max.
             guard let step = extractStep(from: data) else { continue }
             if let ts = step.timestamp, ts < cutoffEpoch { continue }
             let day = step.timestamp.map { dayKey(for: Date(timeIntervalSince1970: $0)) } ?? fallbackDay
@@ -1237,6 +1249,9 @@ enum LocalAntigravityUsage {
     /// Recover model + input/output from a gen_metadata protobuf blob.
     /// Output prefers field pairs where depth-2 f3 == f10 (completion tokens); input is the
     /// first reasonable depth-2 f2 that is not a known budget constant.
+    ///
+    /// Crash fix: never `Int(UInt64)` — large varints (e.g. 0xFFFF_FFFF_FFFF_FFFF sentinels
+    /// in Antigravity blobs) trap with "Not enough bits to represent the passed value".
     private static func extractStep(from data: Data) -> StepUsage? {
         let fields = protoWalk(data, maxDepth: 3)
         var model: String?
@@ -1257,13 +1272,14 @@ enum LocalAntigravityUsage {
         let budgets: Set<Int> = [200, 512, 1000, 1024, 4096, 8192, 10_000, 40_000, 64_000, 200_000]
 
         for field in fields where field.kind == .varint {
-            let v = Int(field.varintValue)
+            // Skip non-fitting UInt64 values (max-uint sentinels, packed nanos, etc.).
+            guard let v = Int(exactly: field.varintValue) else { continue }
             if field.depth == 2, field.number == 2, (1...500_000).contains(v) { f2.append(v) }
             if field.depth == 2, field.number == 3, (1...64_000).contains(v) { f3.append(v) }
             if field.depth == 2, field.number == 10, (1...64_000).contains(v) { f10.append(v) }
             // Unix seconds in the 2023–2033 band.
-            if (1_700_000_000...2_000_000_000).contains(field.varintValue) {
-                timestamps.append(TimeInterval(field.varintValue))
+            if (1_700_000_000...2_000_000_000).contains(v) {
+                timestamps.append(TimeInterval(v))
             }
         }
 
