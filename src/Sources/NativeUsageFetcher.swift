@@ -1118,8 +1118,9 @@ enum NativeUsageFetcher {
         request.httpMethod = "GET"
         request.timeoutInterval = 30
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", forHTTPHeaderField: "User-Agent")
+        request.setValue("cursor-agent/2026.07.07", forHTTPHeaderField: "User-Agent")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -1146,7 +1147,7 @@ enum NativeUsageFetcher {
             }
 
             let membershipFromUsage = stringValue(json, keys: ["membershipType", "membership_type"]) ?? membership
-            let windows = cursorUsageWindows(from: json)
+            let windows = CursorQuotaParser.windows(from: json)
             return ProviderUsageSnapshot(
                 id: authAccountID,
                 providerID: providerID,
@@ -1240,70 +1241,6 @@ enum NativeUsageFetcher {
         case "ultra": return "Cursor Ultra"
         default: return "Cursor \(raw.capitalized)"
         }
-    }
-
-    private static func cursorUsageWindows(from json: [String: Any]) -> [RateWindow] {
-        let plan: [String: Any]? = {
-            if let individual = json["individualUsage"] as? [String: Any],
-               let plan = individual["plan"] as? [String: Any]
-            {
-                return plan
-            }
-            if let individual = json["individual_usage"] as? [String: Any],
-               let plan = individual["plan"] as? [String: Any]
-            {
-                return plan
-            }
-            if let plan = json["planUsage"] as? [String: Any] ?? json["plan_usage"] as? [String: Any] {
-                return plan
-            }
-            return json
-        }()
-
-        func percent(from object: [String: Any]?, usedKeys: [String], totalKeys: [String]) -> Double? {
-            guard let object else { return nil }
-            if let direct = doubleValue(object, keys: usedKeys), direct >= 0 {
-                if direct <= 1 { return direct * 100 }
-                if direct <= 100 { return direct }
-            }
-            let used = doubleValue(object, keys: ["used", "totalSpend", "total_spend"])
-            let limit = doubleValue(object, keys: totalKeys + ["limit", "total"])
-            if let used, let limit, limit > 0 {
-                return min(100, max(0, used / limit * 100))
-            }
-            return nil
-        }
-
-        var windows: [RateWindow] = []
-        if let total = percent(
-            from: plan,
-            usedKeys: ["totalPercentUsed", "total_percent_used"],
-            totalKeys: ["limit"]
-        ) {
-            windows.append(RateWindow(usedPercent: total, label: "Total Usage"))
-        }
-        if let auto = percent(
-            from: plan,
-            usedKeys: ["autoPercentUsed", "auto_percent_used"],
-            totalKeys: ["autoLimit"]
-        ) {
-            windows.append(RateWindow(usedPercent: auto, label: "Auto + Composer"))
-        }
-        if let api = percent(
-            from: plan,
-            usedKeys: ["apiPercentUsed", "api_percent_used"],
-            totalKeys: ["apiLimit"]
-        ) {
-            windows.append(RateWindow(usedPercent: api, label: "API Usage"))
-        }
-        if let onDemand = percent(
-            from: plan,
-            usedKeys: ["onDemandPercentUsed", "on_demand_percent_used"],
-            totalKeys: ["onDemandLimit"]
-        ) {
-            windows.append(RateWindow(usedPercent: onDemand, label: "On-Demand"))
-        }
-        return windows
     }
 
     // MARK: - Copilot

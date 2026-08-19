@@ -53,26 +53,72 @@ final class LocalUsageAttributionTests: XCTestCase {
         XCTAssertTrue(seen.insert("other-id").inserted)
     }
 
-    // MARK: - Grok (cumulative estimate vs context snapshot)
+    // MARK: - Grok (snapshot occupancy; idle and tmp sessions do not count)
 
-    func testGrokEstimateExceedsSnapshotFloor() {
-        // Old code = before + context (a snapshot). New estimate must be strictly larger for a
-        // multi-turn session because each turn re-sends the growing context.
-        let before = 0, context = 53_041, turns = 11
-        let snapshot = before + context
-        let estimate = LocalGrokUsage.estimatedCumulativeTokens(before: before, context: context, turns: turns)
-        XCTAssertEqual(estimate, before + context * (turns + 1) / 2) // 318_246
-        XCTAssertGreaterThan(estimate, snapshot, "regression: Grok must not fall back to the snapshot undercount")
+    func testGrokIdleIsZeroEvenWithContextSnapshot() {
+        XCTAssertEqual(LocalGrokUsage.estimatedCumulativeTokens(before: 0, context: 53_041, turns: 0), 0)
+        XCTAssertEqual(LocalGrokUsage.estimatedCumulativeTokens(before: 100, context: 50, turns: 0), 0)
     }
 
-    func testGrokEstimateAddsPreCompactionSpans() {
+    func testGrokActiveUsesSnapshotNotTurnRamp() {
+        let before = 0, context = 53_041, turns = 11
+        let estimate = LocalGrokUsage.estimatedCumulativeTokens(before: before, context: context, turns: turns)
+        XCTAssertEqual(estimate, before + context)
+        XCTAssertLessThan(
+            estimate,
+            before + context * (turns + 1) / 2,
+            "regression: must not fabricate a triangular turn-ramp"
+        )
+    }
+
+    func testGrokEstimateAddsPreCompactionWithoutRamp() {
         let estimate = LocalGrokUsage.estimatedCumulativeTokens(before: 722_445, context: 75_940, turns: 283)
-        XCTAssertEqual(estimate, 722_445 + 75_940 * 284 / 2)
-        XCTAssertGreaterThan(estimate, 722_445 + 75_940)
+        XCTAssertEqual(estimate, 722_445 + 75_940)
     }
 
     func testGrokEstimateZeroWhenIdle() {
         XCTAssertEqual(LocalGrokUsage.estimatedCumulativeTokens(before: 0, context: 0, turns: 0), 0)
+    }
+
+    func testGrokSkipsEphemeralTmpSessions() {
+        XCTAssertTrue(LocalGrokUsage.isEphemeralSessionPath("/private/tmp/guardianbot/signals.json"))
+        XCTAssertTrue(LocalGrokUsage.isEphemeralSessionPath("%2Fprivate%2Ftmp%2Fguardianbot-fixture/signals.json"))
+        XCTAssertTrue(LocalGrokUsage.isEphemeralSessionPath("/var/folders/xx/T/signals.json"))
+        XCTAssertFalse(LocalGrokUsage.isEphemeralSessionPath("/Users/me/Projects/app/.grok/sessions/x/signals.json"))
+    }
+
+    func testCursorQuotaPrefersUsedLimitOverRemainingPercent() {
+        let json: [String: Any] = [
+            "individualUsage": [
+                "plan": [
+                    "used": 1288,
+                    "limit": 2000,
+                    "remaining": 712,
+                    "totalPercentUsed": 0,
+                    "autoPercentUsed": 100,
+                    "apiPercentUsed": 44,
+                ]
+            ]
+        ]
+        let windows = CursorQuotaParser.windows(from: json)
+        let total = windows.first { $0.label == "Total Usage" }
+        XCTAssertEqual(total?.usedPercent ?? -1, 64.4, accuracy: 0.1)
+    }
+
+    func testCursorQuotaInvertsRemainingPercentWhenNoSpendFields() {
+        let json: [String: Any] = [
+            "individualUsage": [
+                "plan": [
+                    "autoPercentUsed": 100,
+                    "apiPercentUsed": 44,
+                    "totalPercentUsed": 94,
+                ]
+            ]
+        ]
+        let windows = CursorQuotaParser.windows(from: json)
+        XCTAssertEqual(windows.first { $0.label == "Total Usage" }?.usedPercent ?? -1, 6, accuracy: 0.01)
+        XCTAssertEqual(windows.first { $0.label == "Auto + Composer" }?.usedPercent ?? -1, 0, accuracy: 0.01)
+        XCTAssertEqual(windows.first { $0.label == "API Usage" }?.usedPercent ?? -1, 56, accuracy: 0.01)
     }
 
     // MARK: - Kiro (per-turn end_timestamp wins; fallback is stable, never file mtime)

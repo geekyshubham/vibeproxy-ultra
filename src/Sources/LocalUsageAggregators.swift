@@ -1,7 +1,7 @@
 import Foundation
 import SQLite3
 
-private func analyticsCutoffStart(now: Date, historyDays: Int) -> Date {
+func analyticsCutoffStart(now: Date, historyDays: Int) -> Date {
     let lookback = max(0, historyDays - 1)
     let cutoffDate = Calendar.current.date(byAdding: .day, value: -lookback, to: now) ?? now
     return Calendar.current.startOfDay(for: cutoffDate)
@@ -330,6 +330,7 @@ enum LocalGrokUsage {
 
         for case let url as URL in enumerator {
             guard url.lastPathComponent == "signals.json" else { continue }
+            guard !isEphemeralSessionPath(url.path) else { continue }
             guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { continue }
             let mtime = values.contentModificationDate ?? .distantPast
             // Prefer summary.json updated_at/created_at when present so a session whose
@@ -418,6 +419,7 @@ enum LocalGrokUsage {
         var perDay: [Int: [String: ModelBucket]] = [:]
         for case let url as URL in enumerator {
             guard url.lastPathComponent == "signals.json" else { continue }
+            guard !isEphemeralSessionPath(url.path) else { continue }
             guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { continue }
             let mtime = values.contentModificationDate ?? .distantPast
             let activity = sessionActivityDate(sessionDir: url.deletingLastPathComponent()) ?? mtime
@@ -518,12 +520,11 @@ enum LocalGrokUsage {
         let before = intValue(json["totalTokensBeforeCompaction"])
         let context = intValue(json["contextTokensUsed"])
         let turns = intValue(json["assistantMessageCount"])
-        // `contextTokensUsed` is the FINAL context-window occupancy (a snapshot), not tokens
-        // consumed; `before + context` therefore severely undercounts an agentic session that
-        // re-sends its growing context every turn. Estimate cumulative usage from turn count.
+        // Snapshot occupancy (plus pre-compaction), not a triangular turn-ramp: the ramp
+        // fabricated hundreds of millions of tokens from Grok CLI harness sessions and
+        // made Grok look "used" when the user was in Cursor.
         let tokens = estimatedCumulativeTokens(before: before, context: context, turns: turns)
-        // Each assistant message ≈ one API round-trip; the old code hard-coded 1 request/session.
-        let requests = max(1, turns)
+        let requests = max(0, turns)
         let model: String = {
             if let primary = TokenPricingCatalog.normalizeModelID(json["primaryModelId"] as? String) {
                 return primary
@@ -548,17 +549,19 @@ enum LocalGrokUsage {
         return (tokens, cost, model, day, requests)
     }
 
-    /// Estimate cumulative tokens for a Grok session from its final context occupancy and
-    /// turn count. Each agentic turn re-sends the whole (growing) context, so cumulative
-    /// input ≈ the area under a 0→`context` ramp over `turns` responses, plus any
-    /// pre-compaction spans already summed in `before`.
-    /// ponytail: triangular-growth heuristic (assumes ~linear context growth, no mid-session
-    /// shrink); the exact figure would require summing per-turn deltas from updates.jsonl.
-    /// `internal` so the self-check can pin it above the old snapshot floor.
+    /// Tokens for a Grok CLI session. Idle sessions (no assistant turns) count as zero
+    /// even if the CLI wrote a leftover context snapshot. With turns, use occupancy
+    /// (`before` + final `context`) — not a triangular turn-ramp.
     static func estimatedCumulativeTokens(before: Int, context: Int, turns: Int) -> Int {
-        let t = max(1, turns)
-        let ramp = Int(Double(max(0, context)) * Double(t + 1) / 2.0)
-        return max(0, before + ramp)
+        if turns <= 0 { return 0 }
+        return max(0, before) + max(0, context)
+    }
+
+    /// Temp / CI scratch sessions are not interactive Grok CLI use.
+    static func isEphemeralSessionPath(_ path: String) -> Bool {
+        let decoded = (path.removingPercentEncoding ?? path).lowercased()
+        let markers = ["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/"]
+        return markers.contains { decoded.contains($0) }
     }
 
     private static func intValue(_ raw: Any?) -> Int {

@@ -50,6 +50,8 @@ final class UsageStore: ObservableObject {
             ".local/share/opencode", ".opencode",
             ".gemini/antigravity-ide/conversations",
             ".gemini/antigravity-ide/brain",
+            "Library/Application Support/Cursor/User/globalStorage",
+            ".cursor/projects",
         ]
         let fm = FileManager.default
         var newest: Date?
@@ -282,7 +284,7 @@ final class UsageStore: ObservableObject {
                     // Replace local scan providers so stale zeros don't stick after a good rescan.
                     let localIDs: Set<String> = [
                         "codex", "claude", "gemini", "antigravity",
-                        "kiro", "grok", "opencode", "copilot",
+                        "kiro", "grok", "cursor", "opencode", "copilot",
                     ]
                     for id in localIDs { self.costByProvider.removeValue(forKey: id) }
                     for cost in costs {

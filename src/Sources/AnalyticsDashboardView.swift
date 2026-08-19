@@ -142,6 +142,7 @@ struct AnalyticsDashboardView: View {
         case "antigravity": return MenuBarDesign.providerTint(for: .antigravity)
         case "kiro": return MenuBarDesign.providerTint(for: .kiro)
         case "grok": return MenuBarDesign.providerTint(for: .grok)
+        case "cursor": return MenuBarDesign.providerTint(for: .cursor)
         case "opencode", "opencode-go": return Color(red: 0.95, green: 0.55, blue: 0.20)
         case "zai", "z.ai": return MenuBarDesign.providerTint(for: .zai)
         case "kimi": return MenuBarDesign.providerTint(for: .kimi)
@@ -242,6 +243,7 @@ struct AnalyticsDashboardView: View {
         case "antigravity": return "Antigravity"
         case "kiro": return "Kiro CLI"
         case "grok": return "Grok CLI"
+        case "cursor": return "Cursor"
         case "opencode": return "OpenCode"
         case "zai", "z.ai": return "Z.AI"
         case "kimi": return "Kimi"

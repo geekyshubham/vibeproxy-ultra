@@ -129,7 +129,8 @@ enum LocalTokenCostScanner {
         //   Kiro         — per-turn credit metering, exact.
         //   OpenCode     — per-turn `message` rows, exact when they name a model.
         //   Antigravity  — IDE conversation gen_metadata, sessionApproximate.
-        //   Grok         — whole-session estimate on one day, sessionApproximate.
+        //   Grok         — occupancy snapshot on last-activity day; tmp sessions skipped.
+        //   Cursor       — composer context meter / bubble tokens, sessionApproximate.
         //   Copilot      — real day totals, no model dimension, dayTotalsOnly.
         // Copilot has no generic-tree fallback here (unlike allProviderSnapshots): the
         // generic scan buckets by file mtime, which would pin an append-only transcript's
@@ -139,6 +140,7 @@ enum LocalTokenCostScanner {
             { LocalOpenCodeUsage.dailyUsage(now: now, historyDays: historyDays) },
             { LocalAntigravityUsage.dailyUsage(now: now, historyDays: historyDays) },
             { LocalGrokUsage.dailyUsage(now: now, historyDays: historyDays) },
+            { LocalCursorUsage.dailyUsage(now: now, historyDays: historyDays) },
             { LocalCopilotUsage.dailyUsage(now: now, historyDays: historyDays) },
         ]
         for block in specialized {
@@ -175,6 +177,7 @@ enum LocalTokenCostScanner {
 
         take("kiro") { LocalKiroCredits.costSnapshot(now: now, historyDays: historyDays) }
         take("grok") { LocalGrokUsage.costSnapshot(now: now, historyDays: historyDays) }
+        take("cursor") { LocalCursorUsage.costSnapshot(now: now, historyDays: historyDays) }
         take("opencode") { LocalOpenCodeUsage.costSnapshot(now: now, historyDays: historyDays) }
         take("antigravity") { LocalAntigravityUsage.costSnapshot(now: now, historyDays: historyDays) }
         take("copilot") {
