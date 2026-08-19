@@ -87,7 +87,7 @@ enum CodexWorkspaceCredentials {
             ?? JWTEmailExtractor.email(from: stringValue(seed, keys: ["access_token"]))
 
         let candidates = collectCandidates(seed: seed, email: email)
-            .filter { !isTombstonedSeat($0.accountID) }
+            .filter { !isTombstonedSeat($0.accountID, email: $0.email ?? email) }
         guard !candidates.isEmpty else { return nil }
 
         if let preferred {
@@ -178,7 +178,9 @@ enum CodexWorkspaceCredentials {
         var byID: [String: Payload] = [:]
 
         for candidate in collectCandidates(seed: seed, email: email) {
-            if isTombstonedSeat(candidate.accountID), candidate.source != "seed" {
+            if isTombstonedSeat(candidate.accountID, email: candidate.email ?? email),
+               candidate.source != "seed"
+            {
                 continue
             }
             let key = candidate.accountID.lowercased()
@@ -195,8 +197,15 @@ enum CodexWorkspaceCredentials {
         return Array(byID.values)
     }
 
-    private static func isTombstonedSeat(_ accountID: String) -> Bool {
-        AuthAccountLifecycle.isTombstoned("codex:" + accountID.lowercased())
+    private static func isTombstonedSeat(_ accountID: String, email: String? = nil) -> Bool {
+        let id = accountID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let email, !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Two Team members share chatgpt_account_id. Only hide this login.
+            return AuthAccountLifecycle.isTombstoned(
+                AuthAccountLifecycle.seatKey(accountID: id, email: email)
+            )
+        }
+        return AuthAccountLifecycle.isTombstoned("codex:" + id)
     }
 
     // MARK: - Materialize (Cockpit → ~/.cli-proxy-api seat files)
@@ -221,7 +230,7 @@ enum CodexWorkspaceCredentials {
             options: [.skipsHiddenFiles]
         ) else { return 0 }
 
-        // Collapse all sources per account_id first, then write at most once per seat.
+        // Collapse all sources per login (email + account_id), then write at most once per login.
         var bestBySeat: [String: Payload] = [:]
         for file in files where file.pathExtension == "json" {
             let name = file.lastPathComponent.lowercased()
@@ -237,19 +246,23 @@ enum CodexWorkspaceCredentials {
             else { continue }
 
             let key = seat.accountID.lowercased()
-            if tombstones.contains("codex:" + key) { continue }
-            if let existing = bestBySeat[key] {
-                bestBySeat[key] = pickBest(among: [existing, seat]) ?? existing
+            let emailKey = (seat.email ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let tombstoneKey = AuthAccountLifecycle.seatKey(accountID: key, email: seat.email)
+            if tombstones.contains(tombstoneKey) { continue }
+            if emailKey.isEmpty, tombstones.contains("codex:" + key) { continue }
+            let groupKey = emailKey.isEmpty ? key : "\(emailKey)|\(key)"
+            if let existing = bestBySeat[groupKey] {
+                bestBySeat[groupKey] = pickBest(among: [existing, seat]) ?? existing
             } else {
-                bestBySeat[key] = seat
+                bestBySeat[groupKey] = seat
             }
         }
 
         var wrote = 0
-        for (key, seat) in bestBySeat {
+        for (_, seat) in bestBySeat {
             // Only materialize from non-seat sources when the seat file is missing/worse.
             if seat.source.hasPrefix("codex-seat:") { continue }
-            let url = dir.appendingPathComponent(seatFilename(accountID: key))
+            let url = dir.appendingPathComponent(seatFilename(for: seat))
             if let existing = readJSON(url),
                let existingPayload = payload(from: existing, source: "disk", forceAccountID: nil),
                existingPayload.accountID.caseInsensitiveCompare(seat.accountID) == .orderedSame
@@ -273,13 +286,22 @@ enum CodexWorkspaceCredentials {
         return wrote
     }
 
-    /// Stable filename: `codex-seat-{accountID}.json` (Cockpit identity is account_id, not email alone).
+    /// Stable filename: `codex-seat-{accountID}-{email}.json` when email is known so two
+    /// Team members on the same org do not overwrite each other's seat clone.
     static func seatFilename(for payload: Payload) -> String {
-        seatFilename(accountID: payload.accountID)
+        seatFilename(accountID: payload.accountID, email: payload.email)
     }
 
-    static func seatFilename(accountID: String) -> String {
+    static func seatFilename(accountID: String, email: String? = nil) -> String {
         let id = accountID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let email = email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !email.isEmpty
+        {
+            let safe = email
+                .replacingOccurrences(of: "@", with: "_at_")
+                .replacingOccurrences(of: "/", with: "_")
+            return "codex-seat-\(id)-\(safe).json"
+        }
         return "codex-seat-\(id).json"
     }
 
@@ -480,6 +502,11 @@ enum CodexWorkspaceCredentials {
     static func chatgptAccountID(from token: String?) -> String? {
         guard let auth = openAIAuthClaims(from: token) else { return nil }
         return stringValue(auth, keys: ["chatgpt_account_id", "account_id"])
+    }
+
+    static func chatgptUserID(from token: String?) -> String? {
+        guard let auth = openAIAuthClaims(from: token) else { return nil }
+        return stringValue(auth, keys: ["chatgpt_user_id", "user_id"])
     }
 
     static func chatgptPlanType(from token: String?) -> String? {

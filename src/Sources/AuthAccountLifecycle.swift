@@ -12,10 +12,12 @@ enum AuthAccountLifecycle {
 
     // MARK: - Public API
 
-    /// Delete every auth file that belongs to the same provider seat as `account`.
-    /// For Codex: all files whose JWT/stored `account_id` matches.
+    /// Delete every auth file that belongs to the same ChatGPT login + workspace as `account`.
+    /// For Codex: files matching both `chatgpt_account_id` and email (or chatgpt_user_id).
+    /// Team members share a workspace id — matching on that alone would delete every other
+    /// Team login on this Mac.
     /// For others: the single file path (email-keyed).
-    /// Records a tombstone so background materialize cannot revive the seat.
+    /// Records a tombstone so background materialize cannot revive that login.
     @discardableResult
     static func deleteAccountCompletely(
         _ account: AuthAccount,
@@ -48,17 +50,22 @@ enum AuthAccountLifecycle {
         return (deleted, failed)
     }
 
-    /// Seat key used for tombstones / multi-file matching. Codex: `codex:<account_id>`.
+    /// Seat key used for tombstones / multi-file matching.
+    /// Codex: `codex:<email>|<account_id>` so two Team members on the same org
+    /// are not treated as one seat (they share `chatgpt_account_id`).
     static func seatKey(for account: AuthAccount) -> String? {
         if account.type == .codex {
-            if let id = codexAccountID(in: account.filePath) {
-                return "codex:" + id.lowercased()
+            let identity = codexIdentity(in: account.filePath)
+            if let id = identity.accountID {
+                return seatKey(accountID: id, email: identity.email ?? account.email)
             }
             // Filename `codex-seat-{uuid}.json`
             let name = account.filePath.deletingPathExtension().lastPathComponent.lowercased()
             if name.hasPrefix("codex-seat-") {
                 let id = String(name.dropFirst("codex-seat-".count))
-                if !id.isEmpty { return "codex:" + id }
+                if !id.isEmpty {
+                    return seatKey(accountID: id, email: account.email ?? identity.email)
+                }
             }
             return nil
         }
@@ -72,9 +79,21 @@ enum AuthAccountLifecycle {
         loadTombstones(authDirectory: authDirectory).contains(seatKey.lowercased())
     }
 
-    static func clearTombstone(forAccountID accountID: String, authDirectory: URL? = nil) {
-        let key = "codex:" + accountID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        removeTombstone(key, authDirectory: authDirectory)
+    static func seatKey(accountID: String, email: String?) -> String {
+        let id = accountID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let email = email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !email.isEmpty
+        {
+            return "codex:\(email)|\(id)"
+        }
+        return "codex:" + id
+    }
+
+    static func clearTombstone(forAccountID accountID: String, email: String? = nil, authDirectory: URL? = nil) {
+        let dir = authDirectory ?? defaultAuthDirectory()
+        removeTombstone(seatKey(accountID: accountID, email: email), authDirectory: dir)
+        // Legacy unscoped key from older builds (`codex:<account_id>`).
+        removeTombstone("codex:" + accountID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), authDirectory: dir)
     }
 
     static func clearTombstone(seatKey: String, authDirectory: URL? = nil) {
@@ -89,10 +108,10 @@ enum AuthAccountLifecycle {
             includingPropertiesForKeys: nil
         ) else { return }
         for file in files where file.pathExtension == "json" {
-            guard file.lastPathComponent.lowercased().hasPrefix("codex-"),
-                  let id = codexAccountID(in: file)
-            else { continue }
-            clearTombstone(forAccountID: id, authDirectory: dir)
+            guard file.lastPathComponent.lowercased().hasPrefix("codex-") else { continue }
+            let identity = codexIdentity(in: file)
+            guard let id = identity.accountID else { continue }
+            clearTombstone(forAccountID: id, email: identity.email, authDirectory: dir)
         }
     }
 
@@ -148,7 +167,14 @@ enum AuthAccountLifecycle {
         // Always include the visible row's file.
         var urls: [URL] = [account.filePath]
 
-        if account.type == .codex, let accountID = codexAccountID(in: account.filePath) {
+        if account.type == .codex {
+            let target = codexIdentity(in: account.filePath)
+            let targetID = target.accountID
+            let targetEmail = (target.email ?? account.email)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let targetUser = target.userID
+
             if let files = try? FileManager.default.contentsOfDirectory(
                 at: authDirectory,
                 includingPropertiesForKeys: nil,
@@ -157,11 +183,14 @@ enum AuthAccountLifecycle {
                 for file in files where file.pathExtension == "json" {
                     let name = file.lastPathComponent.lowercased()
                     guard name.hasPrefix("codex-") else { continue }
-                    if let id = codexAccountID(in: file),
-                       id.caseInsensitiveCompare(accountID) == .orderedSame
-                    {
-                        urls.append(file)
-                    } else if name == "codex-seat-\(accountID.lowercased()).json" {
+                    let other = codexIdentity(in: file)
+                    if isSameCodexLogin(
+                        targetID: targetID,
+                        targetEmail: targetEmail,
+                        targetUser: targetUser,
+                        file: file,
+                        fileIdentity: other
+                    ) {
                         urls.append(file)
                     }
                 }
@@ -173,21 +202,84 @@ enum AuthAccountLifecycle {
         return urls.filter { seen.insert($0.standardizedFileURL.path).inserted }
     }
 
-    static func codexAccountID(in file: URL) -> String? {
+    /// True when `file` is a duplicate auth file for the same ChatGPT login + workspace.
+    /// Workspace id (`chatgpt_account_id`) is shared by every member of a Team org —
+    /// matching on that alone would delete every other Team login on this Mac.
+    static func isSameCodexLogin(
+        targetID: String?,
+        targetEmail: String?,
+        targetUser: String?,
+        file: URL,
+        fileIdentity: CodexFileIdentity
+    ) -> Bool {
+        let fileID = fileIdentity.accountID
+        let fileEmail = fileIdentity.email?.lowercased()
+        let fileUser = fileIdentity.userID
+        let seatName: String? = {
+            guard let targetID, !targetID.isEmpty else { return nil }
+            return "codex-seat-\(targetID.lowercased()).json"
+        }()
+
+        let sameWorkspace: Bool = {
+            if let targetID, let fileID {
+                return targetID.caseInsensitiveCompare(fileID) == .orderedSame
+            }
+            if let seatName, file.lastPathComponent.lowercased() == seatName {
+                return true
+            }
+            return false
+        }()
+        guard sameWorkspace else { return false }
+
+        if let targetEmail, !targetEmail.isEmpty, let fileEmail, !fileEmail.isEmpty {
+            return targetEmail == fileEmail
+        }
+        if let targetUser, !targetUser.isEmpty, let fileUser, !fileUser.isEmpty {
+            return targetUser.caseInsensitiveCompare(fileUser) == .orderedSame
+        }
+        // Seat clone with no email of its own: only delete if it belongs to this login.
+        if let seatName, file.lastPathComponent.lowercased() == seatName {
+            if let fileEmail, let targetEmail, !targetEmail.isEmpty {
+                return fileEmail == targetEmail
+            }
+            if fileEmail == nil || fileEmail?.isEmpty == true {
+                return true
+            }
+        }
+        return false
+    }
+
+    struct CodexFileIdentity {
+        var accountID: String?
+        var email: String?
+        var userID: String?
+    }
+
+    static func codexIdentity(in file: URL) -> CodexFileIdentity {
         guard let data = try? Data(contentsOf: file),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        if let access = json["access_token"] as? String,
-           let id = CodexWorkspaceCredentials.chatgptAccountID(from: access),
-           !id.isEmpty
-        {
-            return id
-        }
-        if let id = json["account_id"] as? String {
-            let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-        }
-        return nil
+        else { return CodexFileIdentity() }
+
+        let access = json["access_token"] as? String
+        let idToken = json["id_token"] as? String
+        let accountID = CodexWorkspaceCredentials.chatgptAccountID(from: access)
+            ?? CodexWorkspaceCredentials.chatgptAccountID(from: idToken)
+            ?? {
+                let stored = (json["account_id"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return (stored?.isEmpty == false) ? stored : nil
+            }()
+        let email = (json["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedEmail = (email?.isEmpty == false) ? email : (
+            JWTEmailExtractor.email(from: idToken) ?? JWTEmailExtractor.email(from: access)
+        )
+        let userID = CodexWorkspaceCredentials.chatgptUserID(from: access)
+            ?? CodexWorkspaceCredentials.chatgptUserID(from: idToken)
+        return CodexFileIdentity(accountID: accountID, email: resolvedEmail, userID: userID)
+    }
+
+    static func codexAccountID(in file: URL) -> String? {
+        codexIdentity(in: file).accountID
     }
 
     // MARK: - Tombstones

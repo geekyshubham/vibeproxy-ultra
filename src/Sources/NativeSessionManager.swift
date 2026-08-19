@@ -471,7 +471,9 @@ final class NativeSessionManager: ObservableObject {
         if let email { snap["email"] = email }
 
         let seatURL = authFile.deletingLastPathComponent()
-            .appendingPathComponent(CodexWorkspaceCredentials.seatFilename(accountID: outgoingID))
+            .appendingPathComponent(
+                CodexWorkspaceCredentials.seatFilename(accountID: outgoingID, email: email)
+            )
         // Prefer not to clobber a fresher live seat file with an older snapshot.
         if let existing = readJSON(seatURL),
            let existingAccess = nonEmpty(existing["access_token"]),
