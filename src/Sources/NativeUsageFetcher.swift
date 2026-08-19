@@ -37,7 +37,14 @@ enum NativeUsageFetcher {
                 providerID: providerID,
                 error: "Live usage limits are not available for Kimi yet"
             )
-        case .qwen, .cursor, .codebuddy, .gitlab, .kilo:
+        case .cursor:
+            return await fetchCursorUsage(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                payload: payload,
+                authFile: authFile
+            )
+        case .qwen, .codebuddy, .gitlab, .kilo:
             return .empty(
                 authAccountID: authAccountID,
                 providerID: providerID,
@@ -1064,6 +1071,239 @@ enum NativeUsageFetcher {
             resetDescription: resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
             label: label
         )
+    }
+
+    // MARK: - Cursor
+
+    private static func fetchCursorUsage(
+        authAccountID: String,
+        providerID: String,
+        payload: [String: Any],
+        authFile: URL
+    ) async -> ProviderUsageSnapshot {
+        var payload = payload
+        if TokenRefreshService.shouldRefresh(payload: payload) {
+            _ = await TokenRefreshService.refreshAccountFile(authFile)
+            payload = readAuthPayload(at: authFile) ?? payload
+        }
+
+        guard let accessToken = stringValue(payload, keys: ["access_token", "accessToken"]) else {
+            return .empty(authAccountID: authAccountID, providerID: providerID, error: "Missing access token")
+        }
+
+        let email = stringValue(payload, keys: ["email", "cachedEmail"])
+            ?? JWTEmailExtractor.email(from: accessToken)
+        let membership = await fetchCursorStripeMembership(accessToken: accessToken)
+            ?? stringValue(payload, keys: ["membership_type", "plan_type", "plan"])
+        let planLabel = cursorPlanLabel(membership)
+
+        guard let cookie = cursorSessionCookie(accessToken: accessToken),
+              let url = URL(string: "https://cursor.com/api/usage-summary")
+        else {
+            return ProviderUsageSnapshot(
+                id: authAccountID,
+                providerID: providerID,
+                source: "Cursor OAuth",
+                windows: [],
+                accountEmail: email,
+                planType: membership,
+                planLabel: planLabel,
+                updatedAt: Date(),
+                errorMessage: "Could not build Cursor session cookie from this token",
+                isRefreshing: false
+            )
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .empty(authAccountID: authAccountID, providerID: providerID, error: "Invalid response")
+            }
+            if http.statusCode == 401 || http.statusCode == 403 {
+                return .empty(
+                    authAccountID: authAccountID,
+                    providerID: providerID,
+                    accountEmail: email,
+                    error: sessionInvalidMessage(payload: payload, reauthHint: "re-import the Cursor token in Settings")
+                )
+            }
+            guard (200...299).contains(http.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                return .empty(
+                    authAccountID: authAccountID,
+                    providerID: providerID,
+                    accountEmail: email,
+                    error: "Cursor usage API returned HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)"
+                )
+            }
+
+            let membershipFromUsage = stringValue(json, keys: ["membershipType", "membership_type"]) ?? membership
+            let windows = cursorUsageWindows(from: json)
+            return ProviderUsageSnapshot(
+                id: authAccountID,
+                providerID: providerID,
+                source: "Cursor OAuth",
+                windows: windows,
+                accountEmail: email,
+                planType: membershipFromUsage,
+                planLabel: cursorPlanLabel(membershipFromUsage),
+                updatedAt: Date(),
+                errorMessage: windows.isEmpty ? "No Cursor quota data for this plan" : nil,
+                isRefreshing: false
+            )
+        } catch {
+            return .empty(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                accountEmail: email,
+                error: error.localizedDescription
+            )
+        }
+    }
+
+    private static func fetchCursorStripeMembership(accessToken: String) async -> String? {
+        let urls = [
+            "https://api2.cursor.sh/auth/full_stripe_profile",
+            "https://api2.cursor.sh/auth/stripe_profile",
+        ]
+        for urlString in urls {
+            guard let url = URL(string: urlString) else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.timeoutInterval = 15
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode)
+            else { continue }
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let individual = stringValue(json, keys: ["individualMembershipType", "individual_membership_type"]),
+                   !individual.isEmpty,
+                   individual.lowercased() != "free"
+                {
+                    return individual
+                }
+                if let membership = stringValue(json, keys: ["membershipType", "membership_type"]),
+                   !membership.isEmpty
+                {
+                    return membership
+                }
+            }
+            if let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !text.isEmpty,
+               text != "null",
+               !text.hasPrefix("{")
+            {
+                return text
+            }
+        }
+        return nil
+    }
+
+    private static func cursorSessionCookie(accessToken: String) -> String? {
+        guard let userID = cursorWorkosUserID(from: accessToken) else { return nil }
+        return "WorkosCursorSessionToken=\(userID)%3A%3A\(accessToken)"
+    }
+
+    private static func cursorWorkosUserID(from jwt: String) -> String? {
+        let parts = jwt.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = payload.count % 4
+        if remainder > 0 { payload += String(repeating: "=", count: 4 - remainder) }
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sub = json["sub"] as? String
+        else { return nil }
+        return sub.split(separator: "|").last.map(String.init) ?? sub
+    }
+
+    private static func cursorPlanLabel(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        switch raw.lowercased() {
+        case "free": return "Cursor Free"
+        case "pro", "individual": return "Cursor Pro"
+        case "pro_plus", "pro-plus", "proplus": return "Cursor Pro+"
+        case "business", "team": return "Cursor Business"
+        case "enterprise": return "Cursor Enterprise"
+        case "ultra": return "Cursor Ultra"
+        default: return "Cursor \(raw.capitalized)"
+        }
+    }
+
+    private static func cursorUsageWindows(from json: [String: Any]) -> [RateWindow] {
+        let plan: [String: Any]? = {
+            if let individual = json["individualUsage"] as? [String: Any],
+               let plan = individual["plan"] as? [String: Any]
+            {
+                return plan
+            }
+            if let individual = json["individual_usage"] as? [String: Any],
+               let plan = individual["plan"] as? [String: Any]
+            {
+                return plan
+            }
+            if let plan = json["planUsage"] as? [String: Any] ?? json["plan_usage"] as? [String: Any] {
+                return plan
+            }
+            return json
+        }()
+
+        func percent(from object: [String: Any]?, usedKeys: [String], totalKeys: [String]) -> Double? {
+            guard let object else { return nil }
+            if let direct = doubleValue(object, keys: usedKeys), direct >= 0 {
+                if direct <= 1 { return direct * 100 }
+                if direct <= 100 { return direct }
+            }
+            let used = doubleValue(object, keys: ["used", "totalSpend", "total_spend"])
+            let limit = doubleValue(object, keys: totalKeys + ["limit", "total"])
+            if let used, let limit, limit > 0 {
+                return min(100, max(0, used / limit * 100))
+            }
+            return nil
+        }
+
+        var windows: [RateWindow] = []
+        if let total = percent(
+            from: plan,
+            usedKeys: ["totalPercentUsed", "total_percent_used"],
+            totalKeys: ["limit"]
+        ) {
+            windows.append(RateWindow(usedPercent: total, label: "Total Usage"))
+        }
+        if let auto = percent(
+            from: plan,
+            usedKeys: ["autoPercentUsed", "auto_percent_used"],
+            totalKeys: ["autoLimit"]
+        ) {
+            windows.append(RateWindow(usedPercent: auto, label: "Auto + Composer"))
+        }
+        if let api = percent(
+            from: plan,
+            usedKeys: ["apiPercentUsed", "api_percent_used"],
+            totalKeys: ["apiLimit"]
+        ) {
+            windows.append(RateWindow(usedPercent: api, label: "API Usage"))
+        }
+        if let onDemand = percent(
+            from: plan,
+            usedKeys: ["onDemandPercentUsed", "on_demand_percent_used"],
+            totalKeys: ["onDemandLimit"]
+        ) {
+            windows.append(RateWindow(usedPercent: onDemand, label: "On-Demand"))
+        }
+        return windows
     }
 
     // MARK: - Copilot

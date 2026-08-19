@@ -7,11 +7,17 @@ enum TokenRefreshService {
     static let graceInterval: TimeInterval = 15 * 60 // 15 minutes
     /// How often the background timer checks auth files.
     static let pollInterval: TimeInterval = 3 * 60 // 3 minutes
+    /// Codex access tokens last ~10 days; OpenAI refresh tokens die around ~30 days if never rotated.
+    /// Rotate unused sessions well before that wall so idle accounts stay valid.
+    static let unusedSessionRefreshAge: TimeInterval = 7 * 24 * 60 * 60
 
     private static let openAIClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
     private static let anthropicClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private static let googleClientID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
     private static let googleClientSecret = "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"
+    private static let kimiClientID = "17e5f671-d194-4dfb-9706-5516cb48c098"
+    /// Public Cursor desktop OAuth client (same one Cockpit Tools uses).
+    private static let cursorClientID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB"
 
     private static var timer: Timer?
     private static let isoFormatters: [ISO8601DateFormatter] = {
@@ -40,6 +46,11 @@ enum TokenRefreshService {
     }
 
     /// Refresh every refreshable auth file whose access token is within the grace period (or already past).
+    ///
+    /// OpenAI rotates the refresh token on every success and immediately invalidates the previous one.
+    /// Duplicate Codex files (email-named + `codex-seat-*.json`) share that token — refresh once
+    /// per token and write the new one to every sibling, or the leftover file's next refresh
+    /// sends `refresh_token_reused` and OpenAI revokes the whole family.
     @discardableResult
     static func refreshAllNearExpiry(force: Bool = false) async -> Int {
         let authDir = FileManager.default.homeDirectoryForCurrentUser
@@ -49,20 +60,45 @@ enum TokenRefreshService {
             includingPropertiesForKeys: nil
         ) else { return 0 }
 
-        var refreshed = 0
+        var jobs: [AuthRefreshJob] = []
         for file in files where file.pathExtension == "json" {
             guard let payload = NativeUsageFetcher.readAuthPayload(at: file),
                   let type = payload["type"] as? String
             else { continue }
+            guard force || shouldRefresh(payload: payload) else { continue }
+            jobs.append(
+                AuthRefreshJob(
+                    file: file,
+                    payload: payload,
+                    type: type.lowercased(),
+                    refresh: refreshToken(from: payload)
+                )
+            )
+        }
 
-            let needsRefresh = force || shouldRefresh(payload: payload)
-            guard needsRefresh else { continue }
+        var refreshed = 0
+        for group in groupedByRefreshToken(jobs) {
+            guard let first = group.first else { continue }
+            let oldRefresh = first.refresh
+            guard let updated = await refreshPayload(first.payload, type: first.type) else { continue }
 
-            if let updated = await refreshPayload(payload, type: type.lowercased()) {
-                if writeAuthFile(updated, to: file) {
+            var skipped = Set<String>()
+            for job in group {
+                let merged = copyTokenFields(from: updated, onto: job.payload)
+                if writeAuthFile(merged, to: job.file) {
                     refreshed += 1
-                    NSLog("[TokenRefresh] Refreshed %@", file.lastPathComponent)
+                    skipped.insert(job.file.path)
+                    NSLog("[TokenRefresh] Refreshed %@", job.file.lastPathComponent)
                 }
+            }
+            if let oldRefresh, !oldRefresh.isEmpty {
+                refreshed += propagateRotatedTokens(
+                    oldRefresh: oldRefresh,
+                    updated: updated,
+                    authDirectory: authDir,
+                    skipping: skipped
+                )
+                syncNativeCredentialStores(type: first.type, oldRefresh: oldRefresh, updated: updated)
             }
         }
 
@@ -76,11 +112,20 @@ enum TokenRefreshService {
 
     static func refreshAccountFile(_ file: URL) async -> Bool {
         guard let payload = NativeUsageFetcher.readAuthPayload(at: file),
-              let type = payload["type"] as? String,
-              let updated = await refreshPayload(payload, type: type.lowercased())
+              let type = payload["type"] as? String
         else { return false }
+        let oldRefresh = refreshToken(from: payload)
+        guard let updated = await refreshPayload(payload, type: type.lowercased()) else { return false }
         let ok = writeAuthFile(updated, to: file)
         if ok {
+            if let oldRefresh, !oldRefresh.isEmpty {
+                _ = propagateRotatedTokens(
+                    oldRefresh: oldRefresh,
+                    updated: updated,
+                    skipping: [file.path]
+                )
+                syncNativeCredentialStores(type: type.lowercased(), oldRefresh: oldRefresh, updated: updated)
+            }
             await MainActor.run {
                 NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
             }
@@ -90,14 +135,22 @@ enum TokenRefreshService {
 
     // MARK: - Decision
 
-    private static func shouldRefresh(payload: [String: Any]) -> Bool {
+    /// True when the access token is near/past expiry, or when a Codex-style session is old
+    /// enough that its refresh token would otherwise hit OpenAI's idle-expiry wall.
+    static func shouldRefresh(payload: [String: Any]) -> Bool {
         guard refreshToken(from: payload) != nil else { return false }
 
         let now = Date()
         let deadline = now.addingTimeInterval(graceInterval)
 
         if let exp = accessTokenExpiry(from: payload) {
-            return exp <= deadline
+            if exp <= deadline { return true }
+            if let iat = accessTokenIssuedAt(from: payload),
+               iat.addingTimeInterval(unusedSessionRefreshAge) <= now
+            {
+                return true
+            }
+            return false
         }
 
         // No parseable expiry — refresh opportunistically if last_refresh is old.
@@ -107,6 +160,214 @@ enum TokenRefreshService {
             return last.addingTimeInterval(30 * 60) <= now
         }
         return true
+    }
+
+    struct AuthRefreshJob {
+        let file: URL
+        let payload: [String: Any]
+        let type: String
+        let refresh: String?
+    }
+
+    /// One group per (provider, refresh_token). Files without a refresh token stay unique.
+    static func groupedByRefreshToken(_ jobs: [AuthRefreshJob]) -> [[AuthRefreshJob]] {
+        var groups: [String: [AuthRefreshJob]] = [:]
+        var order: [String] = []
+        for job in jobs {
+            let key: String
+            if let rt = job.refresh, !rt.isEmpty {
+                key = job.type + "\u{1e}" + rt
+            } else {
+                key = job.type + "\u{1e}file\u{1e}" + job.file.path
+            }
+            if groups[key] == nil {
+                order.append(key)
+            }
+            groups[key, default: []].append(job)
+        }
+        return order.compactMap { groups[$0] }
+    }
+
+    /// Copy rotated tokens onto every auth file that still holds `oldRefresh`.
+    @discardableResult
+    static func propagateRotatedTokens(
+        oldRefresh: String,
+        updated: [String: Any],
+        authDirectory: URL? = nil,
+        skipping skipped: Set<String> = []
+    ) -> Int {
+        let trimmed = oldRefresh.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        let authDir = authDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cli-proxy-api")
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: authDir,
+            includingPropertiesForKeys: nil
+        ) else { return 0 }
+
+        var wrote = 0
+        for file in files where file.pathExtension == "json" {
+            if skipped.contains(file.path) { continue }
+            guard let payload = NativeUsageFetcher.readAuthPayload(at: file),
+                  refreshToken(from: payload) == trimmed
+            else { continue }
+            let merged = copyTokenFields(from: updated, onto: payload)
+            if writeAuthFile(merged, to: file) {
+                wrote += 1
+                NSLog("[TokenRefresh] Synced rotated refresh token to %@", file.lastPathComponent)
+            }
+        }
+        if syncCodexAuthJSON(oldRefresh: trimmed, updated: updated) {
+            wrote += 1
+        }
+        return wrote
+    }
+
+    /// Official Codex CLI/desktop share the same rotating token via ~/.codex/auth.json + keychain.
+    /// Leave that copy stale and the next CLI refresh sends refresh_token_reused.
+    @discardableResult
+    private static func syncCodexAuthJSON(oldRefresh: String, updated: [String: Any]) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let url = home.appendingPathComponent(".codex/auth.json")
+        guard let data = try? Data(contentsOf: url),
+              var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+
+        var tokens = (root["tokens"] as? [String: Any]) ?? [:]
+        let stored = stringValue(tokens, keys: ["refresh_token"])
+            ?? stringValue(root, keys: ["refresh_token"])
+        guard stored == oldRefresh else { return false }
+
+        if let access = updated["access_token"] {
+            tokens["access_token"] = access
+            root["access_token"] = access
+        }
+        if let refresh = updated["refresh_token"] {
+            tokens["refresh_token"] = refresh
+            root["refresh_token"] = refresh
+        }
+        if let idToken = updated["id_token"] {
+            tokens["id_token"] = idToken
+            root["id_token"] = idToken
+        }
+        root["tokens"] = tokens
+        root["last_refresh"] = isoString(Date())
+        guard writeAuthFile(root, to: url) else { return false }
+        _ = CodexWorkspaceCredentials.writeKeychain(
+            authFileJSON: root,
+            codexHome: home.appendingPathComponent(".codex")
+        )
+        NSLog("[TokenRefresh] Synced rotated refresh token to ~/.codex/auth.json")
+        return true
+    }
+
+    static func copyTokenFields(from updated: [String: Any], onto original: [String: Any]) -> [String: Any] {
+        var out = original
+        for key in [
+            "access_token", "refresh_token", "id_token",
+            "accessToken", "refreshToken",
+            "expires_in", "expired", "expires_at", "last_refresh",
+        ] {
+            if let value = updated[key] {
+                out[key] = value
+            }
+        }
+        return out
+    }
+
+    /// Keep native CLI/desktop copies in lockstep after a rotating refresh.
+    /// Stale ~/.claude, ~/.gemini, or Cursor state.vscdb copies reuse the old token and kill the family.
+    static func syncNativeCredentialStores(type: String, oldRefresh: String, updated: [String: Any]) {
+        let trimmed = oldRefresh.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        switch type {
+        case "codex":
+            break // handled by syncCodexAuthJSON inside propagateRotatedTokens
+        case "claude":
+            syncClaudeCredentials(oldRefresh: trimmed, updated: updated)
+        case "gemini", "antigravity":
+            syncGeminiCredentials(oldRefresh: trimmed, updated: updated)
+        case "cursor":
+            syncCursorState(oldRefresh: trimmed, updated: updated)
+        default:
+            break
+        }
+    }
+
+    private static func syncClaudeCredentials(oldRefresh: String, updated: [String: Any]) {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/.credentials.json")
+        guard let data = try? Data(contentsOf: url),
+              var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+        var oauth = (root["claudeAiOauth"] as? [String: Any]) ?? [:]
+        let stored = stringValue(oauth, keys: ["refreshToken", "refresh_token"])
+            ?? stringValue(root, keys: ["refresh_token"])
+        guard stored == oldRefresh else { return }
+        if let access = stringValue(updated, keys: ["access_token"]) {
+            oauth["accessToken"] = access
+            root["access_token"] = access
+        }
+        if let refresh = stringValue(updated, keys: ["refresh_token"]) {
+            oauth["refreshToken"] = refresh
+            root["refresh_token"] = refresh
+        }
+        root["claudeAiOauth"] = oauth
+        guard writeAuthFile(root, to: url) else { return }
+        if let json = String(data: (try? JSONSerialization.data(withJSONObject: root)) ?? Data(), encoding: .utf8) {
+            writeClaudeKeychain(json)
+        }
+        NSLog("[TokenRefresh] Synced rotated refresh token to ~/.claude/.credentials.json")
+    }
+
+    private static func writeClaudeKeychain(_ json: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = [
+            "add-generic-password", "-U",
+            "-s", "Claude Code-credentials",
+            "-a", NSUserName(),
+            "-w", json,
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+    }
+
+    private static func syncGeminiCredentials(oldRefresh: String, updated: [String: Any]) {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/oauth_creds.json")
+        guard var root = NativeUsageFetcher.readAuthPayload(at: url),
+              stringValue(root, keys: ["refresh_token", "refreshToken"]) == oldRefresh
+        else { return }
+        if let access = stringValue(updated, keys: ["access_token"]) {
+            root["access_token"] = access
+        }
+        if let refresh = stringValue(updated, keys: ["refresh_token"]) {
+            root["refresh_token"] = refresh
+        }
+        if let idToken = stringValue(updated, keys: ["id_token"]) {
+            root["id_token"] = idToken
+        }
+        if writeAuthFile(root, to: url) {
+            NSLog("[TokenRefresh] Synced rotated refresh token to ~/.gemini/oauth_creds.json")
+        }
+    }
+
+    private static func syncCursorState(oldRefresh: String, updated: [String: Any]) {
+        let db = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+        let stored = VscdbStore.readString(dbURL: db, key: "cursorAuth/refreshToken")
+        guard stored == oldRefresh else { return }
+        if let access = stringValue(updated, keys: ["access_token", "accessToken"]) {
+            try? VscdbStore.writeString(dbURL: db, key: "cursorAuth/accessToken", value: access)
+            try? VscdbStore.writeString(dbURL: db, key: "cursor.accessToken", value: access)
+        }
+        if let refresh = stringValue(updated, keys: ["refresh_token", "refreshToken"]) {
+            try? VscdbStore.writeString(dbURL: db, key: "cursorAuth/refreshToken", value: refresh)
+        }
+        NSLog("[TokenRefresh] Synced rotated refresh token to Cursor state.vscdb")
     }
 
     private static func accessTokenExpiry(from payload: [String: Any]) -> Date? {
@@ -138,6 +399,10 @@ enum TokenRefreshService {
             return await refreshXAI(payload)
         case "kiro":
             return await refreshKiro(payload)
+        case "kimi":
+            return await refreshKimi(payload)
+        case "cursor":
+            return await refreshCursor(payload)
         default:
             return nil
         }
@@ -249,18 +514,55 @@ enum TokenRefreshService {
         return nil
     }
 
+    private static func refreshKimi(_ payload: [String: Any]) async -> [String: Any]? {
+        guard let refresh = refreshToken(from: payload) else { return nil }
+        let body = formBody([
+            "client_id": kimiClientID,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+        ])
+        guard let json = await postForm(
+            url: "https://auth.kimi.com/api/oauth/token",
+            body: body
+        ) else { return nil }
+        return applyOAuthTokenResponse(json, to: payload, preferRefreshFromResponse: true)
+    }
+
+    private static func refreshCursor(_ payload: [String: Any]) async -> [String: Any]? {
+        guard let refresh = refreshToken(from: payload) else { return nil }
+        let jsonBody: [String: Any] = [
+            "grant_type": "refresh_token",
+            "client_id": cursorClientID,
+            "refresh_token": refresh,
+        ]
+        guard let json = await postJSON(url: "https://api2.cursor.sh/oauth/token", body: jsonBody),
+              json["shouldLogout"] as? Bool != true
+        else { return nil }
+        guard let updated = applyOAuthTokenResponse(json, to: payload, preferRefreshFromResponse: true) else {
+            return nil
+        }
+        var out = updated
+        if let access = stringValue(out, keys: ["access_token"]) {
+            out["accessToken"] = access
+        }
+        if let newRefresh = stringValue(out, keys: ["refresh_token"]) {
+            out["refreshToken"] = newRefresh
+        }
+        return out
+    }
+
     private static func applyOAuthTokenResponse(
         _ json: [String: Any],
         to payload: [String: Any],
         preferRefreshFromResponse: Bool
     ) -> [String: Any]? {
-        guard let access = stringValue(json, keys: ["access_token"]) else { return nil }
+        guard let access = stringValue(json, keys: ["access_token", "accessToken"]) else { return nil }
         var updated = payload
         updated["access_token"] = access
-        if let idToken = stringValue(json, keys: ["id_token"]) {
+        if let idToken = stringValue(json, keys: ["id_token", "idToken"]) {
             updated["id_token"] = idToken
         }
-        if preferRefreshFromResponse, let newRefresh = stringValue(json, keys: ["refresh_token"]) {
+        if preferRefreshFromResponse, let newRefresh = stringValue(json, keys: ["refresh_token", "refreshToken"]) {
             updated["refresh_token"] = newRefresh
         }
         let expiresIn = (json["expires_in"] as? Int)
@@ -354,7 +656,18 @@ enum TokenRefreshService {
         return nil
     }
 
+    private static func accessTokenIssuedAt(from payload: [String: Any]) -> Date? {
+        guard let token = stringValue(payload, keys: ["access_token", "accessToken", "key"]) else {
+            return nil
+        }
+        return jwtClaimDate(token, key: "iat")
+    }
+
     private static func jwtExpiry(_ token: String) -> Date? {
+        jwtClaimDate(token, key: "exp")
+    }
+
+    private static func jwtClaimDate(_ token: String, key: String) -> Date? {
         let parts = token.split(separator: ".")
         guard parts.count >= 2 else { return nil }
         var payload = String(parts[1])
@@ -367,11 +680,11 @@ enum TokenRefreshService {
         guard let data = Data(base64Encoded: payload),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
-        if let exp = json["exp"] as? TimeInterval {
-            return Date(timeIntervalSince1970: exp)
+        if let value = json[key] as? TimeInterval {
+            return Date(timeIntervalSince1970: value)
         }
-        if let exp = json["exp"] as? Int {
-            return Date(timeIntervalSince1970: TimeInterval(exp))
+        if let value = json[key] as? Int {
+            return Date(timeIntervalSince1970: TimeInterval(value))
         }
         return nil
     }

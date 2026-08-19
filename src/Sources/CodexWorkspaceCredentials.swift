@@ -158,6 +158,12 @@ enum CodexWorkspaceCredentials {
             if let id = refreshed.idToken { resolved.idToken = id }
             resolved.planType = chatgptPlanType(from: resolved.accessToken) ?? resolved.planType
             resolved.accountID = newAID
+            // OpenAI invalidated `refresh`. Push the new token onto every sibling file that
+            // still holds it, or the next unused-file refresh revokes the family.
+            TokenRefreshService.propagateRotatedTokens(
+                oldRefresh: refresh,
+                updated: resolved.asAuthDictionary
+            )
             return .success(resolved)
         }
 

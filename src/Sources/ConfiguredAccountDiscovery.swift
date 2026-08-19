@@ -35,6 +35,7 @@ enum ConfiguredAccountImportKind: Equatable {
     case grokOpenCode
     case antigravityCockpit(email: String)
     case kiroIDE
+    case cursorApp
     case zaiAPIKey(String)
     case opencodeGo(apiKey: String)
 }
@@ -52,8 +53,9 @@ enum ConfiguredAccountDiscovery {
         case .zai: return discoverZai()
         case .kimi: return discoverKimi()
         case .qwen: return discoverQwen()
-        case .cursor, .codebuddy, .gitlab, .kilo:
-            // OAuth onboarding only (no stable local import paths yet).
+        case .cursor: return discoverCursor()
+        case .codebuddy, .gitlab, .kilo:
+            // OAuth / paste-JSON onboarding (no stable local import paths yet).
             return []
         }
     }
@@ -721,6 +723,27 @@ enum ConfiguredAccountDiscovery {
                 displayName: "Kiro IDE session",
                 sourceAppName: "Kiro IDE",
                 importKind: .kiroIDE
+            )
+        ]
+    }
+
+    // MARK: - Cursor
+
+    private static func discoverCursor() -> [DiscoveredConfiguredAccount] {
+        let db = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+        guard let email = VscdbStore.readString(dbURL: db, key: "cursorAuth/cachedEmail")
+            ?? VscdbStore.readString(dbURL: db, key: "cursor.email"),
+              VscdbStore.readString(dbURL: db, key: "cursorAuth/accessToken") != nil
+        else { return [] }
+
+        return [
+            DiscoveredConfiguredAccount(
+                id: "cursor-app-\(email.lowercased())",
+                serviceType: .cursor,
+                displayName: email,
+                sourceAppName: "Cursor app",
+                importKind: .cursorApp
             )
         ]
     }

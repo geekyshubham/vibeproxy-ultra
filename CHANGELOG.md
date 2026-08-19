@@ -4,6 +4,17 @@ All notable changes to **VibeProxy Ultra** are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Paste token JSON** on every provider — drop in `~/.codex/auth.json`, Claude credentials, Cursor token JSON, Copilot oauth, Gemini `oauth_creds.json`, or a CLIProxy auth file and the account is added. No browser round-trip required.
+- **Cursor subscription** — usage-summary + Stripe profile (Total / Auto + Composer / API / On-Demand) and plan labels (Free / Pro / Pro+ / Business / Enterprise). Switch injects into Cursor’s `state.vscdb`.
+- **Multi-instance** — Settings → Instances launches isolated Cursor / Codex / Claude / Antigravity / VS Code Copilot / Kiro / Gemini profiles, each bindable to a VibeProxy account (Cockpit-style `--user-data-dir` / `CODEX_HOME`).
+- Import the signed-in Cursor desktop account from local `state.vscdb`.
+
+### Fixed
+- **Idle OAuth expiry is not Codex-only** — Claude, Gemini, Kimi, Kiro, and Cursor refresh tokens are now rotated on the same keep-alive loop. Duplicate files that share a refresh token still refresh once and fan the new token out. Native copies (`~/.claude/.credentials.json`, `~/.gemini/oauth_creds.json`, Cursor `state.vscdb`) stay in lockstep so a leftover CLI refresh cannot revoke the family.
+
 ## [1.3.1] - 2026-08-02
 
 Usage by date, everywhere numbers are shown.

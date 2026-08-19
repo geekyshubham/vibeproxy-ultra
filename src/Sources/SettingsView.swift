@@ -123,6 +123,7 @@ struct ServiceRow<ExtraContent: View>: View {
     let disabledReasonText: String?
     let customTitle: String?
     let onConnect: () -> Void
+    var onPasteJSON: (() -> Void)? = nil
     let onDisconnect: (AuthAccount) -> Void
     let onToggleDisabled: (AuthAccount) -> Void
     let onToggleEnabled: (Bool) -> Void
@@ -177,10 +178,19 @@ struct ServiceRow<ExtraContent: View>: View {
                     ProgressView()
                         .controlSize(.small)
                 } else if isEnabled {
-                    Button("Add Account") {
-                        onConnect()
+                    HStack(spacing: 6) {
+                        Button("Add Account") {
+                            onConnect()
+                        }
+                        .controlSize(.small)
+                        if let onPasteJSON {
+                            Button("Paste JSON") {
+                                onPasteJSON()
+                            }
+                            .controlSize(.small)
+                            .help("Add an account by pasting token JSON (for example ~/.codex/auth.json)")
+                        }
                     }
-                    .controlSize(.small)
                 }
             }
             
@@ -558,10 +568,12 @@ struct SettingsView: View {
     @State private var selectedCustomProvider: CustomProviderDefinition?
     @State private var customProviderApiKey = ""
     @State private var expandedRowCount = 0
+    @State private var pasteJSONRequest: PasteJSONRequest?
     @State private var settingsPane: SettingsPane = .providers
 
     private enum SettingsPane: String, CaseIterable, Identifiable {
         case providers = "Providers"
+        case instances = "Instances"
         case preferences = "Preferences"
         case analytics = "Analytics"
         case status = "Status"
@@ -571,6 +583,7 @@ struct SettingsView: View {
     private func paneIcon(for pane: SettingsPane) -> String {
         switch pane {
         case .providers: return "square.stack.3d.up.fill"
+        case .instances: return "macwindow.on.rectangle"
         case .preferences: return "slider.horizontal.3"
         case .analytics: return "chart.bar.fill"
         case .status: return "dot.radiowaves.left.and.right"
@@ -642,6 +655,9 @@ struct SettingsView: View {
                         }
                 case .providers:
                     providersForm
+                case .instances:
+                    AppInstancesView(authManager: authManager)
+                        .padding(8)
                 }
             } // ScrollView
 
@@ -660,6 +676,11 @@ struct SettingsView: View {
             customProviderApiKey = ""
         }) { provider in
             customProviderKeySheet(provider)
+        }
+        .sheet(item: $pasteJSONRequest) { request in
+            ManualTokenImportSheet(serviceType: request.type) { text in
+                importPastedJSON(text, for: request.type)
+            }
         }
         .onAppear {
             authManager.checkAuthStatus()
@@ -794,6 +815,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("antigravity"),
                         customTitle: nil,
                         onConnect: { connectService(.antigravity) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .antigravity) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("antigravity", enabled: enabled) },
@@ -815,6 +837,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("claude"),
                         customTitle: serverManager.vercelGatewayEnabled && !serverManager.vercelApiKey.isEmpty ? "Claude Code (via Vercel)" : nil,
                         onConnect: { connectService(.claude) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .claude) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("claude", enabled: enabled) },
@@ -837,6 +860,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("codex"),
                         customTitle: nil,
                         onConnect: { connectService(.codex) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .codex) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("codex", enabled: enabled) },
@@ -858,6 +882,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("gemini"),
                         customTitle: nil,
                         onConnect: { connectService(.gemini) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .gemini) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("gemini", enabled: enabled) },
@@ -879,6 +904,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("xai"),
                         customTitle: nil,
                         onConnect: { connectService(.grok) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .grok) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("xai", enabled: enabled) },
@@ -900,6 +926,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("kiro"),
                         customTitle: nil,
                         onConnect: { connectService(.kiro) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .kiro) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("kiro", enabled: enabled) },
@@ -921,6 +948,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("kimi"),
                         customTitle: nil,
                         onConnect: { connectService(.kimi) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .kimi) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("kimi", enabled: enabled) },
@@ -942,6 +970,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("github-copilot"),
                         customTitle: nil,
                         onConnect: { connectService(.copilot) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .copilot) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("github-copilot", enabled: enabled) },
@@ -963,6 +992,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("qwen"),
                         customTitle: nil,
                         onConnect: { showingQwenEmailPrompt = true },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .qwen) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("qwen", enabled: enabled) },
@@ -984,6 +1014,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("zai"),
                         customTitle: nil,
                         onConnect: { showingZaiApiKeyPrompt = true },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .zai) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("zai", enabled: enabled) },
@@ -998,13 +1029,14 @@ struct SettingsView: View {
                         iconSystemName: "cursorarrow.click.2",
                         accounts: authManager.accounts(for: .cursor),
                         isAuthenticating: authenticatingService == .cursor,
-                        helpText: "Cursor OAuth via CLIProxy. Connect your Cursor subscription for proxied model access.",
+                        helpText: "Cursor subscription via OAuth or pasted tokens. Quota shows Total / Auto + Composer / API usage. Switch injects the account into the Cursor app.",
                         isEnabled: serverManager.isProviderEnabled("cursor"),
                         isToggleLocked: serverManager.isProviderToggleLocked("cursor"),
                         toggleHelpText: serverManager.providerConfigLockReason("cursor"),
                         disabledReasonText: serverManager.providerConfigLockReason("cursor"),
                         customTitle: nil,
                         onConnect: { connectService(.cursor) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .cursor) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("cursor", enabled: enabled) },
@@ -1026,6 +1058,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("codebuddy"),
                         customTitle: nil,
                         onConnect: { connectService(.codebuddy) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .codebuddy) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("codebuddy", enabled: enabled) },
@@ -1047,6 +1080,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("gitlab"),
                         customTitle: nil,
                         onConnect: { connectService(.gitlab) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .gitlab) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("gitlab", enabled: enabled) },
@@ -1068,6 +1102,7 @@ struct SettingsView: View {
                         disabledReasonText: serverManager.providerConfigLockReason("kilo"),
                         customTitle: nil,
                         onConnect: { connectService(.kilo) },
+                        onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .kilo) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("kilo", enabled: enabled) },
@@ -1373,6 +1408,23 @@ struct SettingsView: View {
         }
     }
     
+    private func importPastedJSON(_ text: String, for serviceType: ServiceType) {
+        authenticatingService = serviceType
+        let result = ManualTokenImporter.importPasted(text, preferredType: serviceType)
+        authenticatingService = nil
+        authManager.checkAuthStatus()
+        serverManager.refreshAuthBackedConfiguration()
+        switch result {
+        case .success(let message):
+            authResultSuccess = true
+            authResultMessage = "✓ \(message)"
+        case .failure(let message):
+            authResultSuccess = false
+            authResultMessage = message
+        }
+        showingAuthResult = true
+    }
+
     private func connectService(_ serviceType: ServiceType) {
         authenticatingService = serviceType
         NSLog("[SettingsView] Starting %@ authentication", serviceType.displayName)

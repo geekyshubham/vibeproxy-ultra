@@ -17,6 +17,71 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func TestRefreshTokensIncludesOfflineAccess(t *testing.T) {
+	var gotBody string
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				b, _ := io.ReadAll(req.Body)
+				gotBody = string(b)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"access_token":"at","refresh_token":"rt-new","expires_in":60}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+	if _, err := auth.RefreshTokens(context.Background(), "rt-old"); err != nil {
+		t.Fatalf("RefreshTokens() error = %v", err)
+	}
+	if !strings.Contains(gotBody, "offline_access") {
+		t.Fatalf("refresh body missing offline_access: %s", gotBody)
+	}
+}
+
+func TestRefreshTokens_ConcurrentSingleFlight(t *testing.T) {
+	var calls int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if atomic.AddInt32(&calls, 1) == 1 {
+					close(started)
+				}
+				<-release
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"access_token":"at","refresh_token":"rt-new","expires_in":60}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	const n = 8
+	errCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			_, err := auth.RefreshTokens(context.Background(), "rt-shared")
+			errCh <- err
+		}()
+	}
+	<-started
+	close(release)
+	for i := 0; i < n; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("caller %d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected 1 upstream call, got %d", got)
+	}
+}
+
 func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	var calls int32
 	auth := &CodexAuth{

@@ -30,6 +30,8 @@ enum ConfiguredAccountImporter {
             return importGrokOpenCode(authDirectory: authDirectory, displayName: account.displayName)
         case let .antigravityCockpit(email):
             return importAntigravityCockpit(authDirectory: authDirectory, email: email, displayName: account.displayName)
+        case .cursorApp:
+            return importCursorApp(authDirectory: authDirectory, displayName: account.displayName)
         case let .zaiAPIKey(apiKey):
             return importZaiAPIKey(apiKey: apiKey, authDirectory: authDirectory)
         case .opencodeGo:
@@ -496,6 +498,46 @@ enum ConfiguredAccountImporter {
             filename: "antigravity-\(sanitizeFilename(resolvedEmail)).json",
             authDirectory: authDirectory,
             successLabel: "Imported \(resolvedEmail) from Antigravity"
+        )
+    }
+
+    // MARK: - Cursor
+
+    private static func importCursorApp(authDirectory: URL, displayName: String) -> ConfiguredAccountImportResult {
+        let db = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+        guard let accessToken = VscdbStore.readString(dbURL: db, key: "cursorAuth/accessToken")
+            ?? VscdbStore.readString(dbURL: db, key: "cursor.accessToken")
+        else {
+            return .failure(message: "Could not read Cursor credentials from the local Cursor app")
+        }
+        let email = VscdbStore.readString(dbURL: db, key: "cursorAuth/cachedEmail")
+            ?? VscdbStore.readString(dbURL: db, key: "cursor.email")
+            ?? JWTEmailExtractor.email(from: accessToken)
+            ?? displayName
+        let refresh = VscdbStore.readString(dbURL: db, key: "cursorAuth/refreshToken") ?? ""
+        let plan = VscdbStore.readString(dbURL: db, key: "cursorAuth/stripeMembershipType")
+        let now = Date()
+        var record: [String: Any] = [
+            "type": "cursor",
+            "email": email,
+            "access_token": accessToken,
+            "accessToken": accessToken,
+            "refresh_token": refresh,
+            "refreshToken": refresh,
+            "expired": ISO8601DateFormatter().string(from: now.addingTimeInterval(3600)),
+            "last_refresh": ISO8601DateFormatter().string(from: now),
+            "timestamp": Int(now.timeIntervalSince1970 * 1000),
+        ]
+        if let plan, !plan.isEmpty {
+            record["plan_type"] = plan
+            record["membership_type"] = plan
+        }
+        return writeAuthRecord(
+            record,
+            filename: "cursor-\(sanitizeFilename(email)).json",
+            authDirectory: authDirectory,
+            successLabel: "Imported \(email) from Cursor"
         )
     }
 

@@ -563,6 +563,21 @@ class AuthManager: ObservableObject {
                 return plan
             }
             return nil
+        case .cursor:
+            if let plan = json["membership_type"] as? String ?? json["plan_type"] as? String,
+               !plan.isEmpty
+            {
+                switch plan.lowercased() {
+                case "free": return "Cursor Free"
+                case "pro", "individual": return "Cursor Pro"
+                case "pro_plus", "pro-plus", "proplus": return "Cursor Pro+"
+                case "business", "team": return "Cursor Business"
+                case "enterprise": return "Cursor Enterprise"
+                case "ultra": return "Cursor Ultra"
+                default: return "Cursor \(plan.capitalized)"
+                }
+            }
+            return nil
         default:
             if let plan = json["plan_type"] as? String, !plan.isEmpty {
                 return plan

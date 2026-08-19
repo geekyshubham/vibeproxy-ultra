@@ -43,7 +43,7 @@ final class NativeSessionManager: ObservableObject {
     /// Providers we can both detect and switch.
     /// Antigravity uses its own IDE state DB + Cockpit pointer — not Gemini's
     /// `~/.gemini/google_accounts.json`.
-    static let switchableProviderIDs: Set<String> = ["codex", "claude", "gemini", "antigravity"]
+    static let switchableProviderIDs: Set<String> = ["codex", "claude", "gemini", "antigravity", "cursor"]
 
     func supportsSwitching(_ type: ServiceType) -> Bool {
         guard let id = type.usageProviderID else { return false }
@@ -116,6 +116,7 @@ final class NativeSessionManager: ObservableObject {
         case .claude: return detectClaudeIdentity()
         case .gemini: return detectGoogleIdentity()
         case .antigravity: return detectAntigravityIdentity()
+        case .cursor: return detectCursorIdentity()
         default: return nil
         }
     }
@@ -174,6 +175,16 @@ final class NativeSessionManager: ObservableObject {
             return NativeSessionIdentity(email: nil, accountID: nil, plan: nil)
         }
         return nil
+    }
+
+    private func detectCursorIdentity() -> NativeSessionIdentity? {
+        let db = home.appendingPathComponent("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+        let email = VscdbStore.readString(dbURL: db, key: "cursorAuth/cachedEmail")
+            ?? VscdbStore.readString(dbURL: db, key: "cursor.email")
+        let token = VscdbStore.readString(dbURL: db, key: "cursorAuth/accessToken")
+        guard email != nil || token != nil else { return nil }
+        let plan = VscdbStore.readString(dbURL: db, key: "cursorAuth/stripeMembershipType")
+        return NativeSessionIdentity(email: email, accountID: nil, plan: plan)
     }
 
     private func readAntigravityCurrentEmail() -> String? {
@@ -295,7 +306,7 @@ final class NativeSessionManager: ObservableObject {
 
         // Antigravity IDE keeps state.vscdb open; quit first when restart-on-switch is on
         // so the oauthToken write is not blocked / overwritten.
-        if type == .antigravity, restartApp {
+        if (type == .antigravity || type == .cursor), restartApp {
             _ = await quitApps(for: type)
         }
 
@@ -312,6 +323,7 @@ final class NativeSessionManager: ObservableObject {
                 case .claude: try writeClaudeAuth(from: src)
                 case .gemini: try writeGoogleAuth(from: src, email: email)
                 case .antigravity: try writeAntigravityAuth(from: src, email: email)
+                case .cursor: try writeCursorAuth(from: src)
                 default: return "Switching \(type.displayName) is not supported yet."
                 }
                 return nil
@@ -346,7 +358,7 @@ final class NativeSessionManager: ObservableObject {
         if restartApp {
             // Antigravity was already quit above; only relaunch.
             let restarted: [String]
-            if type == .antigravity {
+            if type == .antigravity || type == .cursor {
                 restarted = await relaunchApps(for: type)
             } else {
                 restarted = await restartApps(for: type)
@@ -564,6 +576,25 @@ final class NativeSessionManager: ObservableObject {
                 "updated_at": Int(Date().timeIntervalSince1970),
             ]
             try backupThenWrite(json: payload, to: url)
+        }
+    }
+
+    private func writeCursorAuth(from src: [String: Any]) throws {
+        guard let access = nonEmpty(src["access_token"]) ?? nonEmpty(src["accessToken"]) else {
+            throw SwitchError.missingToken("access_token")
+        }
+        let db = home.appendingPathComponent("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+        try VscdbStore.writeString(dbURL: db, key: "cursorAuth/accessToken", value: access)
+        try VscdbStore.writeString(dbURL: db, key: "cursor.accessToken", value: access)
+        if let refresh = nonEmpty(src["refresh_token"]) ?? nonEmpty(src["refreshToken"]) {
+            try VscdbStore.writeString(dbURL: db, key: "cursorAuth/refreshToken", value: refresh)
+        }
+        if let email = nonEmpty(src["email"]) ?? nonEmpty(src["cachedEmail"]) {
+            try VscdbStore.writeString(dbURL: db, key: "cursorAuth/cachedEmail", value: email)
+            try VscdbStore.writeString(dbURL: db, key: "cursor.email", value: email)
+        }
+        if let plan = nonEmpty(src["membership_type"]) ?? nonEmpty(src["plan_type"]) {
+            try VscdbStore.writeString(dbURL: db, key: "cursorAuth/stripeMembershipType", value: plan)
         }
     }
 
@@ -941,6 +972,14 @@ final class NativeSessionManager: ObservableObject {
                     "Antigravity IDE.app/Contents/MacOS",
                     "Antigravity.app/Contents/MacOS",
                 ],
+                processNames: []
+            )
+        case .cursor:
+            return AppRestartSpec(
+                label: "Cursor",
+                bundleIDs: ["com.todesktop.230313mzl4w4u92"],
+                names: ["Cursor"],
+                pathFragments: ["Cursor.app/Contents/MacOS/Cursor"],
                 processNames: []
             )
         default:

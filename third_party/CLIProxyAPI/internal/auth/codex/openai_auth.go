@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // OAuth configuration constants for OpenAI Codex
@@ -25,7 +26,13 @@ const (
 	TokenURL    = "https://auth.openai.com/oauth/token"
 	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
 	RedirectURI = "http://localhost:1455/auth/callback"
+	// Must match the original authorize grant. Refreshing without offline_access
+	// can yield tokens that cannot be refreshed again after ~30 days.
+	refreshScope = "openid email profile offline_access"
 )
+
+// Package-level: CodexAuth is constructed per refresh, so an instance group would not de-dupe.
+var codexRefreshGroup singleflight.Group
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
 // It manages the HTTP client and provides methods for generating authorization URLs,
@@ -181,18 +188,33 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 }
 
 // RefreshTokens refreshes an access token using a refresh token.
-// This method is called when an access token has expired. It makes a request to the
-// token endpoint to obtain a new set of tokens.
+// Concurrent callers for the same refresh token share one upstream request: OpenAI
+// rotates the refresh token on success and a second call with the old token returns
+// refresh_token_reused (which revokes the family).
 func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*CodexTokenData, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
 
+	result, err, _ := codexRefreshGroup.Do(refreshToken, func() (interface{}, error) {
+		return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+	})
+	if err != nil {
+		return nil, err
+	}
+	tokenData, ok := result.(*CodexTokenData)
+	if !ok || tokenData == nil {
+		return nil, fmt.Errorf("token refresh failed: invalid single-flight result")
+	}
+	return tokenData, nil
+}
+
+func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken string) (*CodexTokenData, error) {
 	data := url.Values{
 		"client_id":     {ClientID},
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refreshToken},
-		"scope":         {"openid profile email"},
+		"scope":         {refreshScope},
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
