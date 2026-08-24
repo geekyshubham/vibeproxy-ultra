@@ -449,6 +449,10 @@ private struct AccountUsageBlock: View {
     @State private var isWaking = false
     @State private var wakeMessage: String?
     @State private var wakeSucceeded: Bool?
+    @State private var isRedeemingReset = false
+    @State private var pendingResetConfirm = false
+    @State private var resetMessage: String?
+    @State private var resetSucceeded: Bool?
     @State private var isSwitching = false
     @State private var switchMessage: String?
     @State private var switchSucceeded: Bool?
@@ -516,6 +520,7 @@ private struct AccountUsageBlock: View {
                     if canWake {
                         wakeControls
                     }
+                    resetBankControls
                     switchControls
                 }
             }
@@ -624,6 +629,108 @@ private struct AccountUsageBlock: View {
         case .failure(let message):
             wakeSucceeded = false
             wakeMessage = message
+        }
+    }
+
+    // MARK: - Rate-limit reset bank
+
+    /// "Use reset" action for providers with a banked reset inventory
+    /// (ChatGPT/Codex full resets, SuperGrok one-time usage resets).
+    @ViewBuilder
+    private var resetBankControls: some View {
+        if let resets = usage?.rateLimitResets,
+           resets.canRedeem,
+           resets.availableCount > 0,
+           !account.isDisabled,
+           !account.isExpired,
+           showUsage
+        {
+            VStack(alignment: .leading, spacing: 4) {
+                if pendingResetConfirm {
+                    HStack(spacing: 6) {
+                        Text(
+                            resets.availableCount == 1
+                                ? "Use your rate-limit reset now? Limits clear immediately."
+                                : "Use 1 of \(resets.availableCount) resets now? Limits clear immediately."
+                        )
+                        .font(.caption2)
+                        Spacer(minLength: 0)
+                        Button("Cancel") { pendingResetConfirm = false }
+                            .buttonStyle(.plain)
+                            .font(.caption2)
+                        Button("Use Reset") {
+                            pendingResetConfirm = false
+                            Task { @MainActor in await runRedeemReset() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.mini)
+                        .tint(tint)
+                    }
+                } else {
+                    Button {
+                        pendingResetConfirm = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isRedeemingReset {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "arrow.counterclockwise.circle.fill")
+                            }
+                            Text(isRedeemingReset ? "Applying reset…" : "Use rate-limit reset")
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 5)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(tint)
+                    .disabled(isRedeemingReset)
+                    .help(resetButtonHelp(resets.availableCount))
+                }
+
+                if let resetMessage {
+                    Text(resetMessage)
+                        .font(.caption2)
+                        .foregroundStyle(resetSucceeded == true ? MenuBarDesign.success : .orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private func resetButtonHelp(_ availableCount: Int) -> String {
+        switch serviceType {
+        case .codex:
+            return "Apply one banked ChatGPT/Codex reset — clears the 5-hour and weekly Codex limits immediately (\(availableCount) left)."
+        case .grok:
+            return "Apply one SuperGrok usage reset — clears your full weekly pool immediately (\(availableCount) left)."
+        default:
+            return "Apply one banked \(serviceType.displayName) reset — clears current usage limits immediately (\(availableCount) left)."
+        }
+    }
+
+    @MainActor
+    private func runRedeemReset() async {
+        isRedeemingReset = true
+        resetMessage = "Applying reset…"
+        resetSucceeded = nil
+
+        let accountSnapshot = account
+        let result = await Task.detached(priority: .userInitiated) {
+            await RateLimitResetService.redeem(account: accountSnapshot)
+        }.value
+
+        isRedeemingReset = false
+        switch result {
+        case .success(let message):
+            resetSucceeded = true
+            resetMessage = message
+            onWakeCompleted?()
+        case .failure(let message):
+            resetSucceeded = false
+            resetMessage = message
         }
     }
 
@@ -961,9 +1068,9 @@ private struct AccountUsageBlock: View {
         return nil
     }
 
-    /// Cockpit-style chip: how many manual ChatGPT/Codex rate-limit resets remain.
+    /// Cockpit-style chip: how many manual rate-limit resets remain (any provider).
     @ViewBuilder
-    private func rateLimitResetsBadge(_ resets: CodexRateLimitResetCredits, tint: Color) -> some View {
+    private func rateLimitResetsBadge(_ resets: RateLimitResetBank, tint: Color) -> some View {
         let hasResets = resets.availableCount > 0
         HStack(spacing: 8) {
             Image(systemName: hasResets ? "arrow.counterclockwise.circle.fill" : "arrow.counterclockwise.circle")
@@ -992,6 +1099,17 @@ private struct AccountUsageBlock: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(hasResets ? tint.opacity(0.25) : Color.primary.opacity(0.06), lineWidth: 1)
         )
-        .help("Manual rate-limit resets from ChatGPT/Codex (same inventory as Cockpit Tools)")
+        .help(resetBankBadgeHelp)
+    }
+
+    private var resetBankBadgeHelp: String {
+        switch serviceType {
+        case .codex:
+            return "Manual rate-limit resets from ChatGPT/Codex (same inventory as Cockpit Tools). Use the button below to apply one."
+        case .grok:
+            return "SuperGrok one-time usage resets — clear your full weekly pool once per reset. Use the button below to apply one."
+        default:
+            return "Manual rate-limit resets from \(serviceType.displayName). Use the button below to apply one."
+        }
     }
 }

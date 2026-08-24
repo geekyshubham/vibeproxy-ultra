@@ -124,14 +124,29 @@ struct ProviderUsagePayload: Codable, Equatable {
     let accountEmail: String?
 }
 
-/// Manual rate-limit resets (ChatGPT/Codex “Full reset” credits — Cockpit/CodexBar style).
-struct CodexRateLimitResetCredits: Equatable {
-    /// Still-usable resets (status=available and not expired).
+/// Manual rate-limit reset bank shared across providers
+/// (ChatGPT/Codex "Full reset" credits, SuperGrok one-time usage resets, …).
+struct RateLimitResetBank: Equatable {
+    /// Still-usable resets (available and not expired).
     let availableCount: Int
-    /// Soonest expiry among available credits, if any.
+    /// Soonest expiry among available resets, if any.
     let nextExpiresAt: Date?
     /// Product title e.g. "Full reset (Weekly + 5 hr)".
     let sampleTitle: String?
+    /// Whether VibeProxy can redeem/consume a reset programmatically.
+    let canRedeem: Bool
+
+    init(
+        availableCount: Int,
+        nextExpiresAt: Date? = nil,
+        sampleTitle: String? = nil,
+        canRedeem: Bool = true
+    ) {
+        self.availableCount = availableCount
+        self.nextExpiresAt = nextExpiresAt
+        self.sampleTitle = sampleTitle
+        self.canRedeem = canRedeem
+    }
 
     var summaryLine: String {
         if availableCount <= 0 {
@@ -146,6 +161,9 @@ struct CodexRateLimitResetCredits: Equatable {
     }
 }
 
+/// Back-compat alias — the bank is no longer Codex-only (Grok ships one too).
+typealias CodexRateLimitResetCredits = RateLimitResetBank
+
 struct ProviderUsageSnapshot: Equatable, Identifiable {
     let id: String
     let providerID: String
@@ -159,8 +177,8 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
     let planType: String?
     /// Pretty plan / workspace label for the primary row.
     let planLabel: String?
-    /// ChatGPT/Codex flexible rate-limit reset inventory (when API exposes it).
-    let rateLimitResets: CodexRateLimitResetCredits?
+    /// Manual rate-limit reset inventory (ChatGPT/Codex, SuperGrok, …).
+    let rateLimitResets: RateLimitResetBank?
     let updatedAt: Date?
     let errorMessage: String?
     let isRefreshing: Bool
@@ -178,7 +196,7 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
         accountEmail: String? = nil,
         planType: String? = nil,
         planLabel: String? = nil,
-        rateLimitResets: CodexRateLimitResetCredits? = nil,
+        rateLimitResets: RateLimitResetBank? = nil,
         updatedAt: Date? = nil,
         errorMessage: String? = nil,
         isRefreshing: Bool = false

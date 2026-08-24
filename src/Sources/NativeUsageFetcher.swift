@@ -331,13 +331,20 @@ enum NativeUsageFetcher {
         )
     }
 
-    /// `GET …/wham/rate-limit-reset-credits` — manual “Full reset” inventory (Go/Plus/Pro).
-    private static func fetchCodexRateLimitResetCredits(
+    struct CodexResetCredit: Equatable {
+        let id: String
+        let expiresAt: Date?
+        let title: String?
+    }
+
+    /// `GET …/wham/rate-limit-reset-credits` — available "Full reset" credits
+    /// (with IDs so RateLimitResetService can redeem one).
+    static func fetchCodexAvailableResets(
         accessToken: String,
         chatGPTAccountID: String?
-    ) async -> CodexRateLimitResetCredits? {
+    ) async -> [CodexResetCredit] {
         guard let url = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits") else {
-            return nil
+            return []
         }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -357,32 +364,48 @@ enum NativeUsageFetcher {
             guard let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode),
                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return nil }
-
-            let now = Date()
-            let rawCredits = json["credits"] as? [[String: Any]] ?? []
-            var available: [(expires: Date?, title: String?)] = []
-            for credit in rawCredits {
-                let status = (stringValue(credit, keys: ["status"]) ?? "").lowercased()
-                guard status == "available" else { continue }
-                let expires = parseISO8601(stringValue(credit, keys: ["expires_at", "expiresAt"]))
-                if let expires, expires <= now { continue }
-                let title = stringValue(credit, keys: ["title"])
-                available.append((expires, title))
-            }
-
-            // Prefer inventory we validated (status=available & not expired).
-            let next = available.compactMap(\.expires).sorted().first
-            let title = available.first(where: { $0.expires == next })?.title
-                ?? available.first?.title
-            return CodexRateLimitResetCredits(
-                availableCount: available.count,
-                nextExpiresAt: next,
-                sampleTitle: title
-            )
+            else { return [] }
+            return parseCodexCredits(json: json)
         } catch {
-            return nil
+            return []
         }
+    }
+
+    /// Pure credits parsing (unit-testable): status=available and not expired.
+    static func parseCodexCredits(json: [String: Any], now: Date = Date()) -> [CodexResetCredit] {
+        let rawCredits = json["credits"] as? [[String: Any]] ?? []
+        var available: [CodexResetCredit] = []
+        for credit in rawCredits {
+            let status = (stringValue(credit, keys: ["status"]) ?? "").lowercased()
+            guard status == "available" else { continue }
+            let expires = parseISO8601(stringValue(credit, keys: ["expires_at", "expiresAt"]))
+            if let expires, expires <= now { continue }
+            available.append(
+                CodexResetCredit(
+                    id: stringValue(credit, keys: ["id", "credit_id", "creditId"]) ?? "",
+                    expiresAt: expires,
+                    title: stringValue(credit, keys: ["title"])
+                )
+            )
+        }
+        return available
+    }
+
+    private static func fetchCodexRateLimitResetCredits(
+        accessToken: String,
+        chatGPTAccountID: String?
+    ) async -> CodexRateLimitResetCredits? {
+        let credits = await fetchCodexAvailableResets(accessToken: accessToken, chatGPTAccountID: chatGPTAccountID)
+        // Prefer inventory we validated (status=available & not expired).
+        let next = credits.compactMap(\.expiresAt).sorted().first
+        let title = credits.first(where: { $0.expiresAt == next })?.title
+            ?? credits.first?.title
+        return RateLimitResetBank(
+            availableCount: credits.count,
+            nextExpiresAt: next,
+            sampleTitle: title,
+            canRedeem: true
+        )
     }
 
     private struct CodexUsageTarget {
@@ -2061,6 +2084,9 @@ enum NativeUsageFetcher {
                 displayStyle: .percent
             )
 
+            // SuperGrok one-time usage resets (banked "clear the weekly pool" tokens).
+            let resetBank = await RateLimitResetService.fetchGrokBank(accessToken: accessToken)
+
             return .success(
                 ProviderUsageSnapshot(
                     id: authAccountID,
@@ -2069,6 +2095,7 @@ enum NativeUsageFetcher {
                     windows: [primary],
                     accountEmail: email,
                     planLabel: "Grok",
+                    rateLimitResets: resetBank,
                     updatedAt: Date(),
                     errorMessage: nil,
                     isRefreshing: false
@@ -2107,7 +2134,7 @@ enum NativeUsageFetcher {
     }
 
     /// True when `expired` / `expires_at` is in the past (or unparseable as expired).
-    private static func isGrokCredentialExpired(_ payload: [String: Any], now: Date = Date()) -> Bool {
+    static func isGrokCredentialExpired(_ payload: [String: Any], now: Date = Date()) -> Bool {
         if let raw = stringValue(payload, keys: ["expired", "expires_at", "expiresAt"]) {
             if let date = parseISO8601(raw) {
                 return date <= now
@@ -2186,7 +2213,7 @@ enum NativeUsageFetcher {
         return payload.isEmpty ? nil : payload
     }
 
-    private static func readGrokAppPayload() -> [String: Any]? {
+    static func readGrokAppPayload() -> [String: Any]? {
         let authURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".grok/auth.json")
         guard let root = readAuthPayload(at: authURL) else { return nil }
@@ -2644,7 +2671,7 @@ extension NativeUsageFetcher {
         return fieldNumber > 0 && (wireType == 0 || wireType == 1 || wireType == 2 || wireType == 5)
     }
 
-    private static func grokGRPCWebDataFrames(from data: Data) -> [Data] {
+    static func grokGRPCWebDataFrames(from data: Data) -> [Data] {
         let bytes = [UInt8](data)
         var frames: [Data] = []
         var index = 0
@@ -2665,7 +2692,7 @@ extension NativeUsageFetcher {
         return frames
     }
 
-    private static func grokGRPCWebTrailerFields(from data: Data) -> [String: String] {
+    static func grokGRPCWebTrailerFields(from data: Data) -> [String: String] {
         let bytes = [UInt8](data)
         var fields: [String: String] = [:]
         var index = 0
