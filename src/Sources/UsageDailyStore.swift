@@ -13,7 +13,10 @@ import Foundation
 /// VibeProxy, atomic writes) so there is one convention for cached state in this app.
 enum UsageDailyStore {
     /// Bump when the on-disk shape changes; unknown versions are discarded, not guessed at.
-    private static let schemaVersion = 1
+    /// v2: same shape as v1, but v1 Claude rows were ~2.4× inflated (duplicate stream lines
+    /// summed) and v1 OpenCode rows billed free models at fallback rates, so those providers
+    /// are dropped on migration and re-recorded by the next scan.
+    private static let schemaVersion = 2
 
     /// Roughly 13 months, so year-over-year comparisons stay possible while the file
     /// remains bounded (a busy day is a few KB, so this caps out in the low single MB).
@@ -57,15 +60,28 @@ enum UsageDailyStore {
         guard let url = fileURL,
               let data = try? Data(contentsOf: url),
               let payload = try? JSONDecoder().decode(Payload.self, from: data),
-              payload.version == schemaVersion
+              payload.version == schemaVersion || payload.version == 1
         else {
             lock.lock(); loaded = true; lock.unlock()
             return
         }
+
+        var migrated = payload.days
+        if payload.version == 1 {
+            for (day, providers) in migrated {
+                var remaining = providers
+                remaining.removeValue(forKey: "claude")
+                remaining.removeValue(forKey: "opencode")
+                migrated[day] = remaining.isEmpty ? nil : remaining
+            }
+        }
+
         lock.lock()
-        days = payload.days
+        days = migrated
         loaded = true
         lock.unlock()
+
+        if payload.version == 1 { write(migrated) }
     }
 
     // MARK: - Recording

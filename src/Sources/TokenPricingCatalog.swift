@@ -96,6 +96,12 @@ enum TokenPricingCatalog {
         let model = normalized.lowercased()
         let dashed = model.replacingOccurrences(of: ".", with: "-")
 
+        // Free-tier model ids ("…-free") are $0 by definition; without this they fell through
+        // to the $3/$15 fallback and billed dollars for free usage (e.g. x-preview-f-free).
+        if dashed.split(separator: "-").contains("free") {
+            return Rate(inputPerMTok: 0, outputPerMTok: 0, cacheReadPerMTok: 0, cacheWritePerMTok: 0)
+        }
+
         // Live remote list-price (models.dev) wins when the feed knows this model and the user
         // has auto-update enabled. When the toggle is off, ignore any in-memory/disk cache so
         // estimates match the built-in table only (as the Settings copy promises).

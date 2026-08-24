@@ -336,10 +336,16 @@ final class UsageStore: ObservableObject {
 
     // MARK: - Usage by date
 
+    /// Whether the pickers should track the current calendar day. True until the user
+    /// explicitly selects a past date; restored when they pick today again. Without this,
+    /// an app left running kept showing yesterday's card after midnight as if it were today.
+    private var selectionFollowsToday = true
+
     /// Point both date pickers at a different day and republish its summary.
     @MainActor
     func selectDay(_ day: UsageDayKey) {
         selectedDay = day
+        selectionFollowsToday = (day == UsageDayKey(date: Date()))
         refreshDailySummary()
     }
 
@@ -352,6 +358,10 @@ final class UsageStore: ObservableObject {
     /// lookup) — the expensive scan already happened.
     @MainActor
     func refreshDailySummary() {
+        if selectionFollowsToday {
+            let today = UsageDayKey(date: Date())
+            if selectedDay != today { selectedDay = today }
+        }
         dailySummary = UsageDailyStore.summary(for: selectedDay)
         daysWithUsage = UsageDailyStore.availableDays()
     }

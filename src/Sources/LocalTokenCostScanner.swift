@@ -67,7 +67,11 @@ extension ProviderCostSnapshot {
 /// - Codex stores usage in `payload.info.last_token_usage` (per-turn delta) and
 ///   `payload.info.total_token_usage` (cumulative). We sum the *deltas* so we never
 ///   double count, and attribute them to the model from the preceding `turn_context`.
-/// - Claude stores per-assistant-message usage in `message.usage` — summing is correct.
+/// - Claude writes ONE line per content block of an assistant turn, each repeating that
+///   API request's usage (`message.id`/`requestId` identical, `output_tokens` growing
+///   until the final line). Requests are deduped by that identity — last line wins —
+///   including across files, since a resumed session copies history into a new jsonl.
+///   Summing every line over-counted tokens and $ ~2.4× (verified against ccusage).
 /// - Model names are validated so session titles (`slug`), `<synthetic>`, and other
 ///   junk never appear as "models".
 /// - Providers only scan their own log trees (no gemini/antigravity overlap), and files
@@ -271,6 +275,20 @@ enum LocalTokenCostScanner {
         let total: Int
         let cost: Double
         let timestamp: Date?
+        /// Stable per-request identity (Claude `message.id`|`requestId`). Lines sharing it
+        /// describe the same billed API request and must be counted once, last line wins.
+        var dedupKey: String? = nil
+    }
+
+    /// Final usage snapshot for one deduplicatable API request within a file.
+    private struct KeyedRequest {
+        let day: Int
+        let model: String
+        let input: Int
+        let output: Int
+        let cacheRead: Int
+        let total: Int
+        let cost: Double
     }
 
     /// Per-file parsed result, cached by (path, mtime, size) so unchanged files are
@@ -280,8 +298,12 @@ enum LocalTokenCostScanner {
     private struct FileAggregate {
         let mtime: Date
         let size: Int
-        /// day-start epoch (local) -> (model -> bucket)
+        /// day-start epoch (local) -> (model -> bucket), for lines with no request identity
         var perDayModels: [Int: [String: ModelBucket]]
+        /// request identity -> final usage snapshot. Deduped globally in `scanPerDay` so a
+        /// request repeated across content-block lines or copied into a resumed session's
+        /// file is counted exactly once.
+        var keyedRequests: [String: KeyedRequest] = [:]
     }
 
     private static let cacheLock = NSLock()
@@ -310,6 +332,7 @@ enum LocalTokenCostScanner {
         var perDay: [Int: [String: ModelBucket]] = [:]
         var seenPaths = Set<String>()
         var liveKeys = Set<String>()
+        var seenRequestKeys = Set<String>()
 
         for root in directories where fileManager.fileExists(atPath: root.path) {
             guard let enumerator = fileManager.enumerator(
@@ -363,6 +386,22 @@ enum LocalTokenCostScanner {
                         dayModels[model] = merged
                     }
                     perDay[day] = dayModels
+                }
+
+                // Identified requests are deduped across every scanned file: duplicates carry
+                // identical usage, so whichever file is enumerated first can safely win.
+                for (key, request) in aggregate.keyedRequests where request.day >= cutoffDay {
+                    guard seenRequestKeys.insert(key).inserted else { continue }
+                    var dayModels = perDay[request.day] ?? [:]
+                    var merged = dayModels[request.model] ?? ModelBucket()
+                    merged.input += request.input
+                    merged.output += request.output
+                    merged.cacheRead += request.cacheRead
+                    merged.total += request.total
+                    merged.requests += 1
+                    merged.cost += request.cost
+                    dayModels[request.model] = merged
+                    perDay[request.day] = dayModels
                 }
             }
         }
@@ -516,6 +555,7 @@ enum LocalTokenCostScanner {
         cutoff: Date
     ) -> FileAggregate {
         var perDayModels: [Int: [String: ModelBucket]] = [:]
+        var keyedRequests: [String: KeyedRequest] = [:]
 
         guard let data = try? Data(contentsOf: url),
               let content = String(data: data, encoding: .utf8)
@@ -570,6 +610,22 @@ enum LocalTokenCostScanner {
 
             // Attribute to the day the line happened (falls back to file mtime).
             let day = dayKey(for: usage.timestamp ?? mtime)
+
+            // Lines with a request identity are collected last-write-wins: only the final
+            // content-block line of a Claude turn carries the fully-billed output_tokens.
+            if let key = usage.dedupKey {
+                keyedRequests[key] = KeyedRequest(
+                    day: day,
+                    model: usage.model,
+                    input: usage.input,
+                    output: usage.output,
+                    cacheRead: usage.cacheRead,
+                    total: usage.total,
+                    cost: usage.cost
+                )
+                continue
+            }
+
             var dayModels = perDayModels[day] ?? [:]
             var bucket = dayModels[usage.model] ?? ModelBucket()
             bucket.input += usage.input
@@ -582,7 +638,7 @@ enum LocalTokenCostScanner {
             perDayModels[day] = dayModels
         }
 
-        return FileAggregate(mtime: mtime, size: size, perDayModels: perDayModels)
+        return FileAggregate(mtime: mtime, size: size, perDayModels: perDayModels, keyedRequests: keyedRequests)
     }
 
     // MARK: - Per-provider extraction
@@ -728,6 +784,15 @@ enum LocalTokenCostScanner {
             cacheWriteTokens: cacheCreate
         )
 
+        // Identity of the billed API request. Every content-block line of one turn (and any
+        // copy in a resumed session's file) repeats it, so the scanner counts per key, not
+        // per line. Keyless lines (very old logs) fall back to per-line counting.
+        let messageID = stringValue(message, keys: ["id"])
+        let requestID = stringValue(json, keys: ["requestId"])
+        let dedupKey: String? = (messageID != nil || requestID != nil)
+            ? "\(messageID ?? "")|\(requestID ?? "")"
+            : nil
+
         return LineUsage(
             model: model,
             input: input + cacheCreate,
@@ -735,7 +800,8 @@ enum LocalTokenCostScanner {
             cacheRead: cacheRead,
             total: total,
             cost: cost,
-            timestamp: parseTimestamp(json["timestamp"])
+            timestamp: parseTimestamp(json["timestamp"]),
+            dedupKey: dedupKey
         )
     }
 
