@@ -2,10 +2,16 @@ import Foundation
 
 /// Maps Cursor `/api/usage-summary` JSON into quota windows.
 ///
-/// Cursor's `*PercentUsed` fields are **percent remaining**, not percent used
-/// (a barely-used free plan reports `totalPercentUsed ≈ 94`). Treating them as
-/// used made a burnt-down plan look like 0% usage. Prefer `used`/`limit` cents
-/// when present; otherwise invert the remaining-percent fields.
+/// Two payload generations exist:
+/// - **Legacy (no `breakdown`)** — `*PercentUsed` fields are percent *remaining*
+///   (a barely-used free plan reported `totalPercentUsed ≈ 94`), so they must be
+///   inverted; `used`/`limit` cents described the whole allowance.
+/// - **Current (`breakdown` with included/bonus/total)** — Cursor's own UI reads
+///   `totalPercentUsed` as percent *used* ("You've used 42%" ↔ 41.78), while
+///   `used`/`limit` only count the **included** bucket: a fully-spent included
+///   quota reports `2000/2000` even though 12k bonus units remain. Trusting the
+///   cents here made healthy accounts look exhausted. When `breakdown.total > 0`
+///   the percent fields win, read directly.
 enum CursorQuotaParser {
     static func windows(from json: [String: Any], billingCycleEnd: Date? = nil) -> [RateWindow] {
         let reset = billingCycleEnd
@@ -85,16 +91,36 @@ enum CursorQuotaParser {
         return windows
     }
 
-    /// `usedPercent` in 0...100. Prefers cents `used`/`limit`; otherwise inverts remaining %.
-    static func usedPercent(from object: [String: Any]?, remainingPercentKeys: [String]) -> Double? {
+    /// `usedPercent` in 0...100. With a `breakdown` block (current API) the
+    /// percent fields are percent used and authoritative; otherwise fall back
+    /// to cents `used`/`limit`, then to legacy remaining-percent inversion.
+    static func usedPercent(from object: [String: Any]?, percentKeys: [String]) -> Double? {
         guard let object else { return nil }
+
+        // Current API: breakdown present → percents are percent used.
+        let breakdownTotal = (object["breakdown"] as? [String: Any])
+            .flatMap { number($0, keys: ["total"]) }
+        if let breakdownTotal, breakdownTotal > 0 {
+            for key in percentKeys {
+                if let pct = number(object, keys: [key]) {
+                    let scaled = pct <= 1 ? pct * 100 : pct
+                    if scaled >= 0, scaled <= 100 {
+                        return min(100, max(0, scaled))
+                    }
+                }
+            }
+            return nil
+        }
+
         if let used = number(object, keys: ["used", "totalSpend", "total_spend", "includedSpend"]),
            let limit = number(object, keys: ["limit", "total"]),
            limit > 0
         {
             return min(100, max(0, used / limit * 100))
         }
-        for key in remainingPercentKeys {
+
+        // Legacy API: percent fields are percent remaining — invert them.
+        for key in percentKeys {
             if let remaining = number(object, keys: [key]) {
                 let pct = remaining <= 1 ? remaining * 100 : remaining
                 if pct >= 0, pct <= 100 {
@@ -112,7 +138,7 @@ enum CursorQuotaParser {
         resetsAt: Date?,
         resetDescription: String?
     ) -> RateWindow? {
-        guard let used = usedPercent(from: object, remainingPercentKeys: percentKeys) else {
+        guard let used = usedPercent(from: object, percentKeys: percentKeys) else {
             return nil
         }
         let remaining = number(object ?? [:], keys: ["remaining"])

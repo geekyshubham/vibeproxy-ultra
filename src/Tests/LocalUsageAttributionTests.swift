@@ -121,6 +121,52 @@ final class LocalUsageAttributionTests: XCTestCase {
         XCTAssertEqual(windows.first { $0.label == "API Usage" }?.usedPercent ?? -1, 56, accuracy: 0.01)
     }
 
+    /// Regression: current Cursor payloads carry a breakdown block; there
+    /// `*PercentUsed` are percent *used* and `used`/`limit` only cover the
+    /// included bucket. A fully-spent included quota (2000/2000) must NOT read
+    /// as exhausted while bonus units remain — Cursor's UI showed "42%".
+    func testCursorQuotaWithBreakdownTrustsPercentFieldsOverIncludedCents() {
+        let json: [String: Any] = [
+            "individualUsage": [
+                "plan": [
+                    "enabled": true,
+                    "used": 2000,
+                    "limit": 2000,
+                    "remaining": 0,
+                    "breakdown": [
+                        "included": 2000,
+                        "bonus": 12413,
+                        "total": 14413,
+                    ],
+                    "autoPercentUsed": 46.89333333333333,
+                    "apiPercentUsed": 7.666666666666666,
+                    "totalPercentUsed": 41.7768115942029,
+                ]
+            ]
+        ]
+        let windows = CursorQuotaParser.windows(from: json)
+        XCTAssertEqual(windows.first { $0.label == "Total Usage" }?.usedPercent ?? -1, 41.78, accuracy: 0.01)
+        XCTAssertEqual(windows.first { $0.label == "Auto + Composer" }?.usedPercent ?? -1, 46.89, accuracy: 0.01)
+        XCTAssertEqual(windows.first { $0.label == "API Usage" }?.usedPercent ?? -1, 7.67, accuracy: 0.01)
+    }
+
+    /// Without percents but with breakdown cents spanning the full allowance,
+    /// fall back to the cents ratio.
+    func testCursorQuotaBreakdownWithoutPercentsFallsBackToCents() {
+        let json: [String: Any] = [
+            "individualUsage": [
+                "plan": [
+                    "used": 7206,
+                    "limit": 14413,
+                    "remaining": 7207,
+                    "breakdown": ["included": 2000, "bonus": 12413, "total": 14413],
+                ]
+            ]
+        ]
+        let windows = CursorQuotaParser.windows(from: json)
+        XCTAssertEqual(windows.first { $0.label == "Total Usage" }?.usedPercent ?? -1, 50, accuracy: 0.1)
+    }
+
     // MARK: - Kiro (per-turn end_timestamp wins; fallback is stable, never file mtime)
 
     func testKiroParsesSixDigitFractionalTimestamp() {

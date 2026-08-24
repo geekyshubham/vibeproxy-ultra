@@ -59,6 +59,9 @@ enum RateLimitResetService {
             accessToken: accessToken,
             chatGPTAccountID: accountID
         )
+        guard let credits else {
+            return .failure(message: "Could not reach ChatGPT resets — check connection and retry (nothing was consumed).")
+        }
         guard let credit = preferredCodexCredit(credits) else {
             return .failure(message: "No usable ChatGPT rate-limit reset found — nothing to apply.")
         }

@@ -6,6 +6,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- **Cursor usage no longer reads as exhausted** — Current `/api/usage-summary` payloads carry a `breakdown` (included/bonus/total) in which `used`/`limit` only count the *included* bucket, so a fully-spent included quota reported `2000/2000` and VibeProxy showed 100% used while 12k bonus units remained and Cursor's own UI said "42%". When a breakdown is present the `*PercentUsed` fields (which match Cursor's displayed percentage) are trusted directly; legacy payloads without one keep the old cents/inversion logic.
+- **Codex reset badge no longer lies when offline** — The reset-credits refactor made an unreachable ChatGPT API look identical to "no resets banked"; failures now return nothing to display instead of a false "No rate-limit resets left" chip, both on the card and when redeeming.
+
 ### Added
 - **Rate-limit reset banks, with one-tap redemption** — The Overview now shows how many banked resets an account holds and lets you apply one in place, the same way the Wake button works for 5-hour windows. **Grok** joins ChatGPT/Codex: SuperGrok's one-time usage resets (the "clear your full weekly pool" tokens from Settings → Usage, expiring Sep 12, 2026) are read live via xAI's `ConsumerUiSvc` gRPC and can be redeemed from VibeProxy — pick the account, confirm, and the weekly pool clears without opening grok.com. Codex reset credits are now redeemable too (`wham/rate-limit-reset-credits/consume`, soonest-expiring credit first), instead of being display-only. The badge, compact row summary, and "Use rate-limit reset" button render automatically for any provider whose snapshot carries a bank, so future providers need only a fetcher.
 - **Paste token JSON** on every provider — drop in `~/.codex/auth.json`, Claude credentials, Cursor token JSON, Copilot oauth, Gemini `oauth_creds.json`, or a CLIProxy auth file and the account is added. No browser round-trip required.

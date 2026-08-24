@@ -339,12 +339,14 @@ enum NativeUsageFetcher {
 
     /// `GET …/wham/rate-limit-reset-credits` — available "Full reset" credits
     /// (with IDs so RateLimitResetService can redeem one).
+    /// Returns `nil` when the endpoint is unreachable/rejects (vs `[]` for a
+    /// genuine empty inventory) so callers never paint a false "no resets left".
     static func fetchCodexAvailableResets(
         accessToken: String,
         chatGPTAccountID: String?
-    ) async -> [CodexResetCredit] {
+    ) async -> [CodexResetCredit]? {
         guard let url = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits") else {
-            return []
+            return nil
         }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -364,10 +366,10 @@ enum NativeUsageFetcher {
             guard let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode),
                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return [] }
+            else { return nil }
             return parseCodexCredits(json: json)
         } catch {
-            return []
+            return nil
         }
     }
 
@@ -395,7 +397,12 @@ enum NativeUsageFetcher {
         accessToken: String,
         chatGPTAccountID: String?
     ) async -> CodexRateLimitResetCredits? {
-        let credits = await fetchCodexAvailableResets(accessToken: accessToken, chatGPTAccountID: chatGPTAccountID)
+        guard let credits = await fetchCodexAvailableResets(
+            accessToken: accessToken,
+            chatGPTAccountID: chatGPTAccountID
+        ) else {
+            return nil
+        }
         // Prefer inventory we validated (status=available & not expired).
         let next = credits.compactMap(\.expiresAt).sorted().first
         let title = credits.first(where: { $0.expiresAt == next })?.title
