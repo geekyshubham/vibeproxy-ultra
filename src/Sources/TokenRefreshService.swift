@@ -12,6 +12,9 @@ enum TokenRefreshService {
     static let unusedSessionRefreshAge: TimeInterval = 7 * 24 * 60 * 60
 
     private static let openAIClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+    /// Must match the original authorize grant. Refreshing without `offline_access`
+    /// can yield tokens that cannot be refreshed again after ~30 days.
+    static let openAIRefreshScope = "openid email profile offline_access"
     private static let anthropicClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private static let googleClientID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
     private static let googleClientSecret = "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"
@@ -188,7 +191,9 @@ enum TokenRefreshService {
         return order.compactMap { groups[$0] }
     }
 
-    /// Copy rotated tokens onto every auth file that still holds `oldRefresh`.
+    /// Copy rotated tokens onto every auth file that still holds `oldRefresh`,
+    /// plus same-seat siblings (email + chatgpt_account_id) even if their RT is already stale.
+    /// Cockpit copies live under `tokens` and used to keep a dead RT that switch then sent first.
     @discardableResult
     static func propagateRotatedTokens(
         oldRefresh: String,
@@ -208,17 +213,28 @@ enum TokenRefreshService {
         var wrote = 0
         for file in files where file.pathExtension == "json" {
             if skipped.contains(file.path) { continue }
-            guard let payload = NativeUsageFetcher.readAuthPayload(at: file),
-                  refreshToken(from: payload) == trimmed
-            else { continue }
+            guard let payload = NativeUsageFetcher.readAuthPayload(at: file) else { continue }
+            let matchesRefresh = refreshToken(from: payload) == trimmed
+            let matchesSeat = sameCodexSeat(payload, as: updated)
+            guard matchesRefresh || matchesSeat else { continue }
+            // Shared RT always takes the new tokens (OpenAI already rotated).
+            // Seat fan-out must not copy Team onto a Go file or clobber a fresher copy.
+            if !matchesRefresh {
+                if seatsConflict(payload, updated: updated) { continue }
+                if hasNewerAccessToken(payload, than: updated) { continue }
+            }
             let merged = copyTokenFields(from: updated, onto: payload)
             if writeAuthFile(merged, to: file) {
                 wrote += 1
                 NSLog("[TokenRefresh] Synced rotated refresh token to %@", file.lastPathComponent)
             }
         }
-        if syncCodexAuthJSON(oldRefresh: trimmed, updated: updated) {
-            wrote += 1
+        // Native/Cockpit copies only when operating on the real auth dir — tests pass a temp path.
+        if authDirectory == nil {
+            if syncCodexAuthJSON(oldRefresh: trimmed, updated: updated) {
+                wrote += 1
+            }
+            wrote += syncCockpitCodexAccounts(oldRefresh: trimmed, updated: updated)
         }
         return wrote
     }
@@ -261,12 +277,111 @@ enum TokenRefreshService {
         return true
     }
 
+    /// Nested Cockpit `~/.antigravity_cockpit/codex_accounts/*.json` share the rotating RT.
+    @discardableResult
+    private static func syncCockpitCodexAccounts(oldRefresh: String, updated: [String: Any]) -> Int {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".antigravity_cockpit/codex_accounts")
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: nil
+        ) else { return 0 }
+
+        var wrote = 0
+        for file in files where file.pathExtension == "json" {
+            guard var root = NativeUsageFetcher.readAuthPayload(at: file) else { continue }
+            var tokens = (root["tokens"] as? [String: Any]) ?? [:]
+            let stored = stringValue(tokens, keys: ["refresh_token"])
+                ?? stringValue(root, keys: ["refresh_token"])
+            let matchesRefresh = stored == oldRefresh
+            let matchesSeat = sameCodexSeat(root, as: updated)
+            guard matchesRefresh || matchesSeat else { continue }
+            if !matchesRefresh {
+                if seatsConflict(root, updated: updated) { continue }
+                if hasNewerAccessToken(root, than: updated) { continue }
+            }
+            if let access = stringValue(updated, keys: ["access_token"]) {
+                tokens["access_token"] = access
+                root["access_token"] = access
+            }
+            if let refresh = stringValue(updated, keys: ["refresh_token"]) {
+                tokens["refresh_token"] = refresh
+                root["refresh_token"] = refresh
+            }
+            if let idToken = stringValue(updated, keys: ["id_token"]) {
+                tokens["id_token"] = idToken
+                root["id_token"] = idToken
+            }
+            root["tokens"] = tokens
+            root["token_updated_at"] = isoString(Date())
+            if writeAuthFile(root, to: file) {
+                wrote += 1
+                NSLog("[TokenRefresh] Synced rotated refresh token to cockpit %@", file.lastPathComponent)
+            }
+        }
+        return wrote
+    }
+
+    /// Same ChatGPT login + workspace. Team members share account_id — email must match too.
+    static func sameCodexSeat(_ payload: [String: Any], as updated: [String: Any]) -> Bool {
+        let a = flattenedAuth(payload)
+        let b = flattenedAuth(updated)
+        guard let idA = seatAccountID(a), let idB = seatAccountID(b),
+              idA.caseInsensitiveCompare(idB) == .orderedSame
+        else { return false }
+        guard let emailA = seatEmail(a), let emailB = seatEmail(b),
+              emailA.caseInsensitiveCompare(emailB) == .orderedSame
+        else { return false }
+        return true
+    }
+
+    /// JWT seats disagree — do not copy Team tokens onto a Go file (or vice versa).
+    private static func seatsConflict(_ payload: [String: Any], updated: [String: Any]) -> Bool {
+        let a = flattenedAuth(payload)
+        let b = flattenedAuth(updated)
+        guard let idA = CodexWorkspaceCredentials.chatgptAccountID(from: stringValue(a, keys: ["access_token"])),
+              let idB = CodexWorkspaceCredentials.chatgptAccountID(from: stringValue(b, keys: ["access_token"]))
+        else { return false }
+        return idA.caseInsensitiveCompare(idB) != .orderedSame
+    }
+
+    private static func hasNewerAccessToken(_ payload: [String: Any], than updated: [String: Any]) -> Bool {
+        let a = flattenedAuth(payload)
+        let b = flattenedAuth(updated)
+        guard let oldExp = jwtExpiry(stringValue(a, keys: ["access_token"]) ?? ""),
+              let newExp = jwtExpiry(stringValue(b, keys: ["access_token"]) ?? "")
+        else { return false }
+        return oldExp > newExp
+    }
+
+    private static func flattenedAuth(_ json: [String: Any]) -> [String: Any] {
+        var out = json
+        if let tokens = json["tokens"] as? [String: Any] {
+            for (key, value) in tokens where out[key] == nil {
+                out[key] = value
+            }
+        }
+        return out
+    }
+
+    private static func seatAccountID(_ json: [String: Any]) -> String? {
+        CodexWorkspaceCredentials.chatgptAccountID(from: stringValue(json, keys: ["access_token"]))
+            ?? stringValue(json, keys: ["account_id", "chatgpt_account_id"])
+    }
+
+    private static func seatEmail(_ json: [String: Any]) -> String? {
+        stringValue(json, keys: ["email"])
+            ?? JWTEmailExtractor.email(from: stringValue(json, keys: ["id_token"]))
+            ?? JWTEmailExtractor.email(from: stringValue(json, keys: ["access_token"]))
+    }
+
     static func copyTokenFields(from updated: [String: Any], onto original: [String: Any]) -> [String: Any] {
         var out = original
         for key in [
             "access_token", "refresh_token", "id_token",
             "accessToken", "refreshToken",
             "expires_in", "expired", "expires_at", "last_refresh",
+            "account_id", "plan_type",
         ] {
             if let value = updated[key] {
                 out[key] = value
@@ -408,19 +523,39 @@ enum TokenRefreshService {
         }
     }
 
+    enum OAuthGrantResult {
+        case success([String: Any])
+        /// OpenAI saw a previously rotated RT. The family may already be revoked — do not try older copies.
+        case reuseRevoked
+        case failed
+    }
+
+    static func openAIRefreshFields(refreshToken: String) -> [String: String] {
+        [
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": openAIClientID,
+            "scope": openAIRefreshScope,
+        ]
+    }
+
+    /// Single-flight OpenAI refresh so switch + keep-alive cannot rotate the same RT twice.
+    static func refreshOpenAIGrant(refreshToken: String) async -> OAuthGrantResult {
+        let trimmed = refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failed }
+        return await OpenAIRefreshFlight.shared.run(token: trimmed) {
+            await postOpenAIRefresh(refreshToken: trimmed)
+        }
+    }
+
     private static func refreshOpenAI(_ payload: [String: Any]) async -> [String: Any]? {
         guard let refresh = refreshToken(from: payload) else { return nil }
-        let body = formBody([
-            "grant_type": "refresh_token",
-            "refresh_token": refresh,
-            "client_id": openAIClientID,
-        ])
-        guard let json = await postForm(
-            url: "https://auth.openai.com/oauth/token",
-            body: body
-        ) else { return nil }
-
-        return applyOAuthTokenResponse(json, to: payload, preferRefreshFromResponse: true)
+        switch await refreshOpenAIGrant(refreshToken: refresh) {
+        case .success(let json):
+            return applyOAuthTokenResponse(json, to: payload, preferRefreshFromResponse: true)
+        case .reuseRevoked, .failed:
+            return nil
+        }
     }
 
     private static func refreshAnthropic(_ payload: [String: Any]) async -> [String: Any]? {
@@ -585,6 +720,37 @@ enum TokenRefreshService {
         return Data(encoded.utf8)
     }
 
+    private static func postOpenAIRefresh(refreshToken: String) async -> OAuthGrantResult {
+        guard let endpoint = URL(string: "https://auth.openai.com/oauth/token") else { return .failed }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.httpBody = formBody(openAIRefreshFields(refreshToken: refreshToken))
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let bodyText = String(data: data, encoding: .utf8) ?? ""
+            if bodyText.lowercased().contains("refresh_token_reused") {
+                NSLog("[TokenRefresh] OpenAI refresh_token_reused — stopping sibling attempts")
+                return .reuseRevoked
+            }
+            guard let http = response as? HTTPURLResponse else { return .failed }
+            guard (200...299).contains(http.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  json["error"] == nil,
+                  stringValue(json, keys: ["access_token"]) != nil
+            else {
+                NSLog("[TokenRefresh] OpenAI refresh failed status %d", (response as? HTTPURLResponse)?.statusCode ?? -1)
+                return .failed
+            }
+            return .success(json)
+        } catch {
+            NSLog("[TokenRefresh] OpenAI refresh request error: %@", error.localizedDescription)
+            return .failed
+        }
+    }
+
     private static func postForm(url: String, body: Data) async -> [String: Any]? {
         guard let endpoint = URL(string: url) else { return nil }
         var request = URLRequest(url: endpoint)
@@ -693,5 +859,26 @@ enum TokenRefreshService {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.string(from: date)
+    }
+}
+
+/// One in-flight OpenAI grant per refresh token. A second POST with the old token
+/// returns `refresh_token_reused` and OpenAI revokes the family.
+private actor OpenAIRefreshFlight {
+    static let shared = OpenAIRefreshFlight()
+    private var inflight: [String: Task<TokenRefreshService.OAuthGrantResult, Never>] = [:]
+
+    func run(
+        token: String,
+        work: @Sendable @escaping () async -> TokenRefreshService.OAuthGrantResult
+    ) async -> TokenRefreshService.OAuthGrantResult {
+        if let existing = inflight[token] {
+            return await existing.value
+        }
+        let task = Task { await work() }
+        inflight[token] = task
+        let result = await task.value
+        inflight[token] = nil
+        return result
     }
 }

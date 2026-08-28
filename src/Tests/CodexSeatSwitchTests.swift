@@ -131,6 +131,80 @@ final class CodexSeatSwitchTests: XCTestCase {
         XCTAssertEqual(CodexWorkspaceCredentials.chatgptPlanType(from: resolved?.accessToken), "go")
     }
 
+    func testScorePrefersRecentlyExpiredCliProxyOverAncientCockpit() {
+        let recent = CodexWorkspaceCredentials.Payload(
+            accessToken: Self.makeUnsignedJWT(
+                auth: ["chatgpt_account_id": teamAccountID, "chatgpt_plan_type": "team"],
+                exp: Date().addingTimeInterval(-3600)
+            ),
+            refreshToken: "rt-recent",
+            idToken: nil,
+            accountID: teamAccountID,
+            email: "user@example.com",
+            planType: "team",
+            source: "cli-proxy:codex-seat.json"
+        )
+        let ancient = CodexWorkspaceCredentials.Payload(
+            accessToken: Self.makeUnsignedJWT(
+                auth: ["chatgpt_account_id": teamAccountID, "chatgpt_plan_type": "team"],
+                exp: Date().addingTimeInterval(-47 * 24 * 3600)
+            ),
+            refreshToken: "rt-ancient",
+            idToken: nil,
+            accountID: teamAccountID,
+            email: "user@example.com",
+            planType: "team",
+            source: "cockpit:codex_old.json"
+        )
+        XCTAssertGreaterThan(
+            CodexWorkspaceCredentials.score(recent),
+            CodexWorkspaceCredentials.score(ancient),
+            "stale Cockpit copy must not outrank a newer cli-proxy token"
+        )
+        XCTAssertEqual(
+            CodexWorkspaceCredentials.pickBest(among: [ancient, recent])?.refreshToken,
+            "rt-recent"
+        )
+    }
+
+    func testUniqueRefreshLineagesNewestFirstDropsDuplicateRT() {
+        let ancient = CodexWorkspaceCredentials.Payload(
+            accessToken: Self.makeUnsignedJWT(
+                auth: ["chatgpt_account_id": teamAccountID, "chatgpt_plan_type": "team"],
+                exp: Date().addingTimeInterval(-40 * 24 * 3600)
+            ),
+            refreshToken: "rt-old",
+            idToken: nil,
+            accountID: teamAccountID,
+            email: "user@example.com",
+            planType: "team",
+            source: "cockpit:old.json"
+        )
+        let mid = CodexWorkspaceCredentials.Payload(
+            accessToken: Self.makeUnsignedJWT(
+                auth: ["chatgpt_account_id": teamAccountID, "chatgpt_plan_type": "team"],
+                exp: Date().addingTimeInterval(-2 * 24 * 3600)
+            ),
+            refreshToken: "rt-mid",
+            idToken: nil,
+            accountID: teamAccountID,
+            email: "user@example.com",
+            planType: "team",
+            source: "cli-proxy:codex-seat.json"
+        )
+        let midDup = CodexWorkspaceCredentials.Payload(
+            accessToken: mid.accessToken,
+            refreshToken: "rt-mid",
+            idToken: nil,
+            accountID: teamAccountID,
+            email: "user@example.com",
+            planType: "team",
+            source: "seed"
+        )
+        let order = CodexWorkspaceCredentials.uniqueRefreshLineages([ancient, midDup, mid])
+        XCTAssertEqual(order.compactMap(\.refreshToken), ["rt-mid", "rt-old"])
+    }
+
     func testSeatFilenameIsStablePerAccountID() {
         let a = CodexWorkspaceCredentials.seatFilename(accountID: teamAccountID)
         let b = CodexWorkspaceCredentials.seatFilename(accountID: teamAccountID.uppercased())

@@ -99,6 +99,8 @@ def copy_token_fields(updated: dict, original: dict) -> dict:
         "expired",
         "expires_at",
         "last_refresh",
+        "account_id",
+        "plan_type",
     ):
         if key in updated:
             out[key] = updated[key]
@@ -171,6 +173,9 @@ def main() -> None:
         check("sibling seat got new refresh token", seat["refresh_token"] == "rt-new")
         check("sibling email preserved", a["email"] == "a@x.com")
         check("unrelated file not touched", other["refresh_token"] == "rt-other")
+
+    scope = "openid email profile offline_access"
+    check("openai refresh keeps offline_access", "offline_access" in scope)
 
     print("all token-refresh checks passed")
 

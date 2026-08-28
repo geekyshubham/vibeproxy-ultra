@@ -86,6 +86,49 @@ final class TokenRefreshServiceTests: XCTestCase {
         XCTAssertEqual(other["access_token"] as? String, "old-at")
     }
 
+    func testOpenAIRefreshFieldsIncludeOfflineAccessScope() {
+        let fields = TokenRefreshService.openAIRefreshFields(refreshToken: "rt.1.x")
+        XCTAssertEqual(fields["grant_type"], "refresh_token")
+        XCTAssertEqual(fields["refresh_token"], "rt.1.x")
+        XCTAssertEqual(fields["scope"], TokenRefreshService.openAIRefreshScope)
+        XCTAssertTrue(TokenRefreshService.openAIRefreshScope.contains("offline_access"))
+        XCTAssertNotNil(fields["client_id"])
+    }
+
+    func testSameCodexSeatRequiresEmailAndAccountID() {
+        let teamJWT = Self.jwtWithAuth(
+            accountID: "f7268a18-b7e1-42d3-b4b1-286f67b74b4d",
+            plan: "team"
+        )
+        let goJWT = Self.jwtWithAuth(
+            accountID: "b8490ad0-efd0-4413-a1f3-38e7e1dcb977",
+            plan: "go"
+        )
+        let team = [
+            "email": "a@x.com",
+            "access_token": teamJWT,
+            "account_id": "f7268a18-b7e1-42d3-b4b1-286f67b74b4d",
+        ]
+        let teamSibling = [
+            "email": "a@x.com",
+            "access_token": teamJWT,
+            "account_id": "f7268a18-b7e1-42d3-b4b1-286f67b74b4d",
+        ]
+        let otherMember = [
+            "email": "b@x.com",
+            "access_token": teamJWT,
+            "account_id": "f7268a18-b7e1-42d3-b4b1-286f67b74b4d",
+        ]
+        let go = [
+            "email": "a@x.com",
+            "access_token": goJWT,
+            "account_id": "b8490ad0-efd0-4413-a1f3-38e7e1dcb977",
+        ]
+        XCTAssertTrue(TokenRefreshService.sameCodexSeat(team, as: teamSibling))
+        XCTAssertFalse(TokenRefreshService.sameCodexSeat(team, as: otherMember))
+        XCTAssertFalse(TokenRefreshService.sameCodexSeat(team, as: go))
+    }
+
     func testCopyTokenFieldsIncludesCamelCaseAliases() {
         let original: [String: Any] = [
             "type": "cursor",
@@ -110,6 +153,19 @@ final class TokenRefreshServiceTests: XCTestCase {
         let payloadObj: [String: Any] = [
             "iat": Int(iat.timeIntervalSince1970),
             "exp": Int(exp.timeIntervalSince1970),
+        ]
+        let payload = try! JSONSerialization.data(withJSONObject: payloadObj).base64URLToken()
+        return "\(header).\(payload).sig"
+    }
+
+    private static func jwtWithAuth(accountID: String, plan: String) -> String {
+        let header = Data(#"{"alg":"none","typ":"JWT"}"#.utf8).base64URLToken()
+        let payloadObj: [String: Any] = [
+            "https://api.openai.com/auth": [
+                "chatgpt_account_id": accountID,
+                "chatgpt_plan_type": plan,
+            ],
+            "exp": Int(Date().addingTimeInterval(3600).timeIntervalSince1970),
         ]
         let payload = try! JSONSerialization.data(withJSONObject: payloadObj).base64URLToken()
         return "\(header).\(payload).sig"

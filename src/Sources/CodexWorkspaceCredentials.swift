@@ -12,6 +12,8 @@ import Foundation
 ///   `~/.antigravity_cockpit/codex_accounts/*.json`
 /// - Materialize each seat to its own auth file so UI dedupe does not collapse them by email
 /// - Refresh before switch; refuse to write a dead seat (expired access + failed refresh)
+/// - Rank by JWT recency so a stale Cockpit copy cannot beat a newer cli-proxy token
+/// - Try each distinct refresh token newest-first; persist rotated tokens before any seat check
 enum CodexWorkspaceCredentials {
     struct Payload: Equatable {
         var accessToken: String
@@ -113,61 +115,86 @@ enum CodexWorkspaceCredentials {
     }
 
     /// Resolve + refresh when access is expired/near-expiry (Cockpit prepare_account_for_injection).
+    ///
+    /// Tries **every distinct refresh token** for the target seat, newest JWT first.
+    /// A stale Cockpit copy must not be the only attempt — its dead RT can return
+    /// `refresh_token_reused` and revoke the live cli-proxy family.
     static func resolveFresh(
         preferredAccountID: String?,
         seed: [String: Any],
         email hintEmail: String? = nil
     ) async -> Result<Payload, ResolveError> {
-        guard var resolved = resolve(
-            preferredAccountID: preferredAccountID,
-            seed: seed,
-            email: hintEmail
-        ) else {
-            if let preferredAccountID, !preferredAccountID.isEmpty {
-                return .failure(.noSeatLineage(accountID: preferredAccountID))
+        let preferred = preferredAccountID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+        let email = (hintEmail ?? stringValue(seed, keys: ["email"]))
+            ?? JWTEmailExtractor.email(from: stringValue(seed, keys: ["id_token"]))
+            ?? JWTEmailExtractor.email(from: stringValue(seed, keys: ["access_token"]))
+
+        let pool: [Payload]
+        if let preferred {
+            let matches = collectCandidates(seed: seed, email: email)
+                .filter { $0.accountID.caseInsensitiveCompare(preferred) == .orderedSame }
+                .filter {
+                    !isTombstonedSeat($0.accountID, email: $0.email ?? email) || $0.source == "seed"
+                }
+            if !matches.isEmpty {
+                pool = matches
+            } else if let fromSeed = payload(from: seed, source: "seed", forceAccountID: nil),
+                      fromSeed.accountID.caseInsensitiveCompare(preferred) == .orderedSame
+            {
+                pool = [fromSeed]
+            } else {
+                return .failure(.noSeatLineage(accountID: preferred))
             }
+        } else if let resolved = resolve(preferredAccountID: nil, seed: seed, email: hintEmail) {
+            pool = [resolved]
+        } else {
             return .failure(.missingAccessToken)
         }
 
-        if !resolved.isAccessExpired {
-            return .success(resolved)
+        if let live = pickBest(among: pool.filter { !$0.isAccessExpired }) {
+            return .success(live)
         }
 
-        // Access expired — must refresh (Cockpit does this on switch).
-        guard let refresh = resolved.refreshToken, !refresh.isEmpty else {
-            return .failure(.refreshFailed(accountID: resolved.accountID, plan: resolved.planType))
-        }
+        var lastPlan = pickBest(among: pool)?.planType
+        var lastID = preferred ?? pickBest(among: pool)?.accountID ?? ""
 
-        if let refreshed = await refreshOpenAI(
-            accessToken: resolved.accessToken,
-            refreshToken: refresh,
-            idToken: resolved.idToken
-        ) {
-            // Refresh must preserve seat. If OAuth returns a different chatgpt_account_id,
-            // this refresh token belongs to another seat — reject for this preferred target.
-            let newAID = chatgptAccountID(from: refreshed.accessToken) ?? resolved.accountID
-            if let preferred = preferredAccountID?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .nilIfEmpty,
-               newAID.caseInsensitiveCompare(preferred) != .orderedSame
-            {
-                return .failure(.refreshFailed(accountID: preferred, plan: resolved.planType))
+        for candidate in uniqueRefreshLineages(pool) {
+            guard let refresh = candidate.refreshToken, !refresh.isEmpty else { continue }
+            lastPlan = candidate.planType
+            lastID = preferred ?? candidate.accountID
+            switch await TokenRefreshService.refreshOpenAIGrant(refreshToken: refresh) {
+            case .success(let json):
+                guard let access = stringValue(json, keys: ["access_token"]), !access.isEmpty else {
+                    continue
+                }
+                let newAID = chatgptAccountID(from: access) ?? candidate.accountID
+                var resolved = candidate
+                resolved.accessToken = access
+                resolved.refreshToken = stringValue(json, keys: ["refresh_token"]) ?? refresh
+                resolved.idToken = stringValue(json, keys: ["id_token"]) ?? candidate.idToken
+                resolved.planType = chatgptPlanType(from: access) ?? candidate.planType
+                resolved.accountID = newAID
+                // Persist *before* the seat check. OpenAI already invalidated `refresh`;
+                // dropping the new tokens leaves every sibling file holding a reused RT.
+                TokenRefreshService.propagateRotatedTokens(
+                    oldRefresh: refresh,
+                    updated: resolved.asAuthDictionary
+                )
+                if let preferred, newAID.caseInsensitiveCompare(preferred) != .orderedSame {
+                    continue
+                }
+                return .success(resolved)
+            case .reuseRevoked:
+                // Older sibling RTs are the reused family — sending them makes it worse.
+                return .failure(.refreshFailed(accountID: lastID, plan: lastPlan))
+            case .failed:
+                continue
             }
-            resolved.accessToken = refreshed.accessToken
-            if let rt = refreshed.refreshToken { resolved.refreshToken = rt }
-            if let id = refreshed.idToken { resolved.idToken = id }
-            resolved.planType = chatgptPlanType(from: resolved.accessToken) ?? resolved.planType
-            resolved.accountID = newAID
-            // OpenAI invalidated `refresh`. Push the new token onto every sibling file that
-            // still holds it, or the next unused-file refresh revokes the family.
-            TokenRefreshService.propagateRotatedTokens(
-                oldRefresh: refresh,
-                updated: resolved.asAuthDictionary
-            )
-            return .success(resolved)
         }
 
-        return .failure(.refreshFailed(accountID: resolved.accountID, plan: resolved.planType))
+        return .failure(.refreshFailed(accountID: lastID, plan: lastPlan))
     }
 
     /// All known seat-scoped payloads for this email (for multi-sub usage probes).
@@ -317,7 +344,7 @@ enum CodexWorkspaceCredentials {
 
     // MARK: - Ranking
 
-    /// Prefer JWT-matching, non-expired, cockpit, then any.
+    /// Prefer JWT-matching, non-expired, recency, then source.
     static func pickBest(among candidates: [Payload]) -> Payload? {
         guard !candidates.isEmpty else { return nil }
         return candidates.max { lhs, rhs in
@@ -332,10 +359,34 @@ enum CodexWorkspaceCredentials {
         }
         if !p.isAccessExpired { s += 50 }
         if p.refreshToken?.isEmpty == false { s += 10 }
+        // Recency beats source. A 47-day-old Cockpit copy used to outrank a 1-day-expired
+        // cli-proxy file (+5 vs +2) and its dead RT then revoked the live family.
+        if let exp = accessTokenExpiry(p.accessToken) {
+            let hours = exp.timeIntervalSinceNow / 3600
+            s += Int(max(-400.0, min(400.0, hours.rounded(.towardZero))))
+        }
         if p.source.hasPrefix("cockpit") { s += 5 }
         if p.source == "seed" { s += 3 }
         if p.source.hasPrefix("cli-proxy") || p.source.hasPrefix("codex-seat") { s += 2 }
         return s
+    }
+
+    /// Distinct refresh tokens for a seat, newest access JWT first.
+    static func uniqueRefreshLineages(_ candidates: [Payload]) -> [Payload] {
+        let sorted = candidates.sorted { lhs, rhs in
+            let leftExp = accessTokenExpiry(lhs.accessToken) ?? .distantPast
+            let rightExp = accessTokenExpiry(rhs.accessToken) ?? .distantPast
+            if leftExp != rightExp { return leftExp > rightExp }
+            return score(lhs) > score(rhs)
+        }
+        var seen = Set<String>()
+        var out: [Payload] = []
+        for candidate in sorted {
+            let rt = candidate.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !rt.isEmpty, seen.insert(rt).inserted else { continue }
+            out.append(candidate)
+        }
+        return out
     }
 
     // MARK: - Collection
@@ -451,50 +502,6 @@ enum CodexWorkspaceCredentials {
             planType: plan,
             source: source
         )
-    }
-
-    // MARK: - OpenAI refresh
-
-    private struct RefreshedTokens {
-        let accessToken: String
-        let refreshToken: String?
-        let idToken: String?
-    }
-
-    private static let openAIClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
-
-    private static func refreshOpenAI(
-        accessToken: String,
-        refreshToken: String,
-        idToken: String?
-    ) async -> RefreshedTokens? {
-        guard let url = URL(string: "https://auth.openai.com/oauth/token") else { return nil }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        var components = URLComponents()
-        components.queryItems = [
-            URLQueryItem(name: "grant_type", value: "refresh_token"),
-            URLQueryItem(name: "refresh_token", value: refreshToken),
-            URLQueryItem(name: "client_id", value: openAIClientID),
-        ]
-        request.httpBody = Data((components.percentEncodedQuery ?? "").utf8)
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
-                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  json["error"] == nil,
-                  let access = stringValue(json, keys: ["access_token"])
-            else { return nil }
-            let newRefresh = stringValue(json, keys: ["refresh_token"]) ?? refreshToken
-            let newID = stringValue(json, keys: ["id_token"]) ?? idToken
-            return RefreshedTokens(accessToken: access, refreshToken: newRefresh, idToken: newID)
-        } catch {
-            return nil
-        }
     }
 
     // MARK: - JWT helpers

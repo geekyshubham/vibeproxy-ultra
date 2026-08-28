@@ -4,7 +4,8 @@
 Mirrors the critical production rules:
 - seats are keyed by chatgpt_account_id (not email alone)
 - expired access + dead refresh => refuse switch (do not write dead Go tokens)
-- live Team seat can refresh / write
+- recently-expired cli-proxy tokens beat ancient Cockpit copies
+- unique refresh tokens are tried newest-first
 - seat files materialize as codex-seat-{account_id}.json
 
 Exit 0 on success, 1 on failure.
@@ -15,14 +16,9 @@ import base64
 import json
 import sys
 import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-TOKEN_URL = "https://auth.openai.com/oauth/token"
 GO_ID = "b8490ad0-efd0-4413-a1f3-38e7e1dcb977"
 TEAM_ID = "f7268a18-b7e1-42d3-b4b1-286f67b74b4d"
 EMAIL = "shubham.takankhar@gmail.com"
@@ -61,10 +57,14 @@ def score(account_id: str, token: str, source: str, has_refresh: bool) -> int:
     s = 0
     if (auth.get("chatgpt_account_id") or "").lower() == account_id.lower():
         s += 100
-    if jwt_exp(token) > datetime.now(timezone.utc):
+    now = datetime.now(timezone.utc)
+    exp = jwt_exp(token)
+    if exp > now:
         s += 50
     if has_refresh:
         s += 10
+    hours = (exp - now).total_seconds() / 3600
+    s += int(max(-400, min(400, hours)))
     if source.startswith("cockpit"):
         s += 5
     if source == "seed":
@@ -78,17 +78,15 @@ def seat_filename(account_id: str) -> str:
     return f"codex-seat-{account_id.strip().lower()}.json"
 
 
-def try_refresh(rt: str) -> dict | None:
-    data = urllib.parse.urlencode(
-        {"grant_type": "refresh_token", "refresh_token": rt, "client_id": CLIENT_ID}
-    ).encode()
-    req = urllib.request.Request(TOKEN_URL, data=data, method="POST")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read())
-    except Exception:
-        return None
+def unique_refresh_lineages(cands: list[tuple[datetime, str]]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, rt in sorted(cands, key=lambda c: c[0], reverse=True):
+        if not rt or rt in seen:
+            continue
+        seen.add(rt)
+        out.append(rt)
+    return out
 
 
 def main() -> int:
@@ -101,7 +99,6 @@ def main() -> int:
             failures.append(name)
             print(f"FAIL {name}" + (f": {detail}" if detail else ""))
 
-    now = datetime.now(timezone.utc)
     go_live = make_jwt(GO_ID, "go", datetime(2030, 1, 1, tzinfo=timezone.utc))
     go_dead = make_jwt(GO_ID, "go", datetime(2020, 1, 1, tzinfo=timezone.utc))
     team_live = make_jwt(TEAM_ID, "team", datetime(2030, 1, 1, tzinfo=timezone.utc))
@@ -113,6 +110,24 @@ def main() -> int:
 
     s_team = score(TEAM_ID, team_live, "seed", True)
     check("team live scores high", s_team >= 150, str(s_team))
+
+    team_recent_dead = make_jwt(TEAM_ID, "team", datetime.now(timezone.utc) - timedelta(hours=25))
+    team_ancient = make_jwt(TEAM_ID, "team", datetime(2026, 7, 11, tzinfo=timezone.utc))
+    s_recent = score(TEAM_ID, team_recent_dead, "cli-proxy", True)
+    s_ancient = score(TEAM_ID, team_ancient, "cockpit", True)
+    check(
+        "recently-expired cli-proxy beats ancient cockpit",
+        s_recent > s_ancient,
+        f"{s_recent} vs {s_ancient}",
+    )
+    order = unique_refresh_lineages(
+        [
+            (jwt_exp(team_ancient), "rt-old"),
+            (jwt_exp(team_recent_dead), "rt-mid"),
+            (jwt_exp(team_recent_dead), "rt-mid"),
+        ]
+    )
+    check("unique RTs newest-first, duplicates dropped", order == ["rt-mid", "rt-old"], str(order))
 
     # foreign seat must not accept Go JWT as Team
     go_auth = jwt_auth(go_live)
@@ -234,40 +249,13 @@ def main() -> int:
         check("materialized at least team seat", TEAM_ID.lower() in seats, str(list(seats)))
         check("materialized go seat lineage (even if expired)", GO_ID.lower() in seats)
 
-        # Team switch path: live or refreshable
+        # Do not POST real refresh tokens here. A success without persist rotates
+        # the family out from under the auth files. Switch refuses expired+dead
+        # (Swift resolveFresh); live refresh is keep-alive / switch-path only.
         team = seats.get(TEAM_ID.lower())
-        if team:
-            exp = jwt_exp(team["access_token"])
-            if exp > now:
-                check("team access live — switch allowed without refresh", True)
-            else:
-                refreshed = try_refresh(team.get("refresh_token") or "")
-                check("team refresh when expired", refreshed is not None)
-                if refreshed:
-                    auth = jwt_auth(refreshed["access_token"])
-                    check(
-                        "team refresh keeps team seat",
-                        auth.get("chatgpt_account_id") == TEAM_ID
-                        and auth.get("chatgpt_plan_type") == "team",
-                    )
-        else:
-            check("team seat present", False)
-
-        # Go switch path: must refuse if access expired and refresh dead
+        check("team seat present", team is not None)
         go = seats.get(GO_ID.lower())
-        if go:
-            exp = jwt_exp(go["access_token"])
-            if exp > now:
-                check("go access live — switch allowed", True)
-            else:
-                refreshed = try_refresh(go.get("refresh_token") or "")
-                check(
-                    "go expired+dead RT refuses switch (no dead token write)",
-                    refreshed is None,
-                    "refresh unexpectedly succeeded",
-                )
-        else:
-            check("go seat lineage present for dual-seat UX", False)
+        check("go seat lineage present for dual-seat UX", go is not None)
 
     if failures:
         print(f"\n{len(failures)} failure(s)")
