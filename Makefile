@@ -1,7 +1,7 @@
 .PHONY: build app install clean run help
 
 help: ## Show this help message
-	@echo "VibeProxy - macOS Menu Bar App"
+	@echo "VibeRouter - macOS Menu Bar App"
 	@echo ""
 	@echo "Available targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -19,23 +19,23 @@ release: ## Build the Swift executable (release)
 app: ## Create the .app bundle
 	@echo "📦 Creating .app bundle..."
 	@./create-app-bundle.sh
-	@echo "✅ App bundle created: VibeProxy Ultra.app"
+	@echo "✅ App bundle created: VibeRouter.app"
 
 install: app ## Build and install to /Applications
 	@echo "📲 Installing to /Applications..."
-	@rm -rf "/Applications/VibeProxy Ultra.app" "/Applications/VibeProxy.app"
-	@cp -R "VibeProxy Ultra.app" /Applications/
-	@xattr -cr "/Applications/VibeProxy Ultra.app" || true
-	@echo "✅ Installed to /Applications/VibeProxy Ultra.app"
+	@rm -rf "/Applications/VibeRouter.app" "/Applications/VibeRouter.app"
+	@cp -R "VibeRouter.app" /Applications/
+	@xattr -cr "/Applications/VibeRouter.app" || true
+	@echo "✅ Installed to /Applications/VibeRouter.app"
 
 run: app ## Build and run the app
 	@echo "🚀 Launching app..."
-	@open "VibeProxy Ultra.app"
+	@open "VibeRouter.app"
 
 clean: ## Clean build artifacts
 	@echo "🧹 Cleaning..."
 	@rm -rf src/.build
-	@rm -rf "VibeProxy.app"
+	@rm -rf "VibeRouter.app"
 	@rm -rf src/Sources/Resources/cli-proxy-api
 	@rm -rf src/Sources/Resources/config.yaml
 	@rm -rf src/Sources/Resources/static
@@ -47,7 +47,7 @@ test: ## Run a quick test build
 	@echo "✅ Test build successful"
 
 info: ## Show project information
-	@echo "Project: VibeProxy - macOS Menu Bar App"
+	@echo "Project: VibeRouter - macOS Menu Bar App"
 	@echo "Language: Swift 5.9+"
 	@echo "Platform: macOS 13.0+"
 	@echo ""
@@ -59,15 +59,15 @@ info: ## Show project information
 	@tree -L 3 -I ".build" || echo "  (install 'tree' for better output)"
 
 open: ## Open app bundle to inspect contents
-	@if [ -d "VibeProxy.app" ]; then \
-		open "VibeProxy.app"; \
+	@if [ -d "VibeRouter.app" ]; then \
+		open "VibeRouter.app"; \
 	else \
 		echo "❌ App bundle not found. Run 'make app' first."; \
 	fi
 
 edit-config: ## Edit the bundled config.yaml
-	@if [ -d "VibeProxy.app" ]; then \
-		open -e "VibeProxy.app/Contents/Resources/config.yaml"; \
+	@if [ -d "VibeRouter.app" ]; then \
+		open -e "VibeRouter.app/Contents/Resources/config.yaml"; \
 	else \
 		echo "❌ App bundle not found. Run 'make app' first."; \
 	fi

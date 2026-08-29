@@ -107,7 +107,7 @@ export default function UsageByDatePanel() {
 
       {usage.isError ? (
         <div className="small">
-          Could not read the usage history. It is written by the VibeProxy app as it scans
+          Could not read the usage history. It is written by the VibeRouter app as it scans
           your CLI sessions.
         </div>
       ) : !models.length ? (
@@ -116,7 +116,7 @@ export default function UsageByDatePanel() {
               date is expected, not a bug. */}
           {data?.earliestDay
             ? `Recorded history starts ${dayLabel(data.earliestDay)}.`
-            : 'History builds as VibeProxy scans your CLI sessions.'}
+            : 'History builds as VibeRouter scans your CLI sessions.'}
         </div>
       ) : (
         <>

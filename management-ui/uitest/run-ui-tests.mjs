@@ -1,5 +1,5 @@
 /* ============================================================================
-   run-ui-tests.mjs — real frontend UI tests for the VibeProxy management panel.
+   run-ui-tests.mjs — real frontend UI tests for the VibeRouter management panel.
 
    Drives the ACTUAL served page in headless Chromium (Playwright):
      - loads http://127.0.0.1:<port>/management.html from an isolated backend
@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const PORT = process.argv[2] || '8450';
-const KEY = process.argv[3] || 'vibeproxy-admin';
+const KEY = process.argv[3] || 'viberouter-admin';
 const BASE = `http://127.0.0.1:${PORT}`;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SHOTS = join(HERE, 'shots');

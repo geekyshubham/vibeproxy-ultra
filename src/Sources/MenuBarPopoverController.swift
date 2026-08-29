@@ -179,7 +179,7 @@ final class MenuBarPopoverController: NSObject, NSPopoverDelegate {
         menu.addItem(withTitle: "Copy Server URL", action: #selector(copyURLAction), keyEquivalent: "")
         menu.addItem(withTitle: "Open Dashboard", action: #selector(openDashboardAction), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit VibeProxy Ultra", action: #selector(quitAction), keyEquivalent: "q")
+        menu.addItem(withTitle: "Quit VibeRouter", action: #selector(quitAction), keyEquivalent: "q")
 
         for item in menu.items {
             item.target = self

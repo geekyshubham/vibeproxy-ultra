@@ -128,7 +128,7 @@ CLIProxyAPIは[Amp CLI](https://ampcode.com)およびAmp IDE拡張機能の統�
 
 CLIProxyAPIをベースにした以下のプロジェクトがあります：
 
-### [vibeproxy](https://github.com/automazeio/vibeproxy)
+### [viberouter](https://github.com/automazeio/viberouter)
 
 macOSネイティブのメニューバーアプリで、Claude CodeとChatGPTのサブスクリプションをAIコーディングツールで使用可能 - APIキー不要
 

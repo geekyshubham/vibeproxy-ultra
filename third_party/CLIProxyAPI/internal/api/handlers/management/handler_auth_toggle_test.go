@@ -7,7 +7,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
-// The management console is a localhost tool, so VibeProxy Ultra lets the user turn the
+// The management console is a localhost tool, so VibeRouter lets the user turn the
 // key requirement off. These tests pin the safety property that makes that acceptable:
 // disabling auth must never expose management beyond the local machine, because the
 // management API hands out plaintext API keys and linked accounts.

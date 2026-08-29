@@ -191,7 +191,7 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 	}
 	localPath := filepath.Join(staticDir, managementAssetName)
 
-	// VibeProxy Ultra: when a control panel is compiled into the binary, it is the
+	// VibeRouter: when a control panel is compiled into the binary, it is the
 	// single source of truth. Reconcile the on-disk copy against the embedded bytes
 	// and never reach out to GitHub / the fallback page. This makes the panel fully
 	// self-contained and immune to the upstream auto-updater overwriting our UI.
@@ -317,7 +317,7 @@ func reconcileEmbeddedManagementHTML(staticDir, localPath string) error {
 		return fmt.Errorf("write embedded management asset: %w", err)
 	}
 
-	log.Infof("management asset written from embedded VibeProxy Ultra panel (hash=%s)", embeddedHash)
+	log.Infof("management asset written from embedded VibeRouter panel (hash=%s)", embeddedHash)
 	return nil
 }
 

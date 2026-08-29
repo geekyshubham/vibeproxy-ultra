@@ -20,7 +20,7 @@ enum NativeSwitchOutcome: Equatable {
 /// active session by rewriting the native auth files and (optionally) restarting the
 /// associated desktop app — the same technique Cockpit Tools uses.
 ///
-/// VibeProxy stores accounts as CLIProxy auth files under `~/.cli-proxy-api/`; this
+/// VibeRouter stores accounts as CLIProxy auth files under `~/.cli-proxy-api/`; this
 /// manager translates a selected account's tokens into the *native* auth location
 /// (`~/.codex/auth.json`, `~/.claude/.credentials.json`, `~/.gemini/oauth_creds.json`,
 /// Antigravity IDE `state.vscdb` + Cockpit `current_account.json`).
@@ -75,7 +75,7 @@ final class NativeSessionManager: ObservableObject {
     // MARK: - Detection
 
     /// Reads the native auth locations off the main thread and matches them against the
-    /// provided VibeProxy accounts. Cheap (small files + one keychain read for Claude).
+    /// provided VibeRouter accounts. Cheap (small files + one keychain read for Claude).
     func refresh(accounts: [ServiceType: [AuthAccount]]) {
         isRefreshing = true
         Task.detached(priority: .utility) { [weak self] in
@@ -1239,7 +1239,7 @@ final class NativeSessionManager: ObservableObject {
     /// These files hold OAuth tokens, so keep them owner-only (0600).
     private func backupThenWrite(json: [String: Any], to url: URL) throws {
         if fileManager.fileExists(atPath: url.path) {
-            let backup = url.appendingPathExtension("vibeproxy-bak")
+            let backup = url.appendingPathExtension("viberouter-bak")
             if !fileManager.fileExists(atPath: backup.path) {
                 try? fileManager.copyItem(at: url, to: backup)
                 try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)

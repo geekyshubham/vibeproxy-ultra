@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 /// Isolated desktop-app profiles (Cockpit-style multi-instance).
-/// Each instance has its own user-data directory and can bind one VibeProxy account.
+/// Each instance has its own user-data directory and can bind one VibeRouter account.
 struct ManagedAppInstance: Identifiable, Codable, Equatable {
     var id: String
     var name: String
@@ -43,14 +43,14 @@ enum AppInstanceManager {
 
     private static var storeURL: URL {
         let root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/VibeProxy")
+            .appendingPathComponent("Library/Application Support/VibeRouter")
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent(fileName)
     }
 
     static func defaultDataDirectory(provider: ServiceType, instanceID: String) -> URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/VibeProxy/instances")
+            .appendingPathComponent("Library/Application Support/VibeRouter/instances")
             .appendingPathComponent(provider.rawValue)
             .appendingPathComponent(instanceID)
     }

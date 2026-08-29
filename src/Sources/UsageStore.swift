@@ -163,7 +163,7 @@ final class UsageStore: ObservableObject {
         await statusTask?.value
     }
 
-    /// Operational status for a given Ultra provider (Overview dots).
+    /// Operational status for a given VibeRouter provider (Overview dots).
     func statusLevel(for serviceType: ServiceType) -> ProviderStatusLevel? {
         providerStatuses.first { $0.serviceTypes.contains(serviceType) }?.level
     }

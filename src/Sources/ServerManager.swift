@@ -97,10 +97,10 @@ class ServerManager: ObservableObject {
     }
     private var logBuffer: RingBuffer<String>
     private let maxLogLines = 1000
-    private let processQueue = DispatchQueue(label: "com.vibeproxy.ultra.server-process", qos: .userInitiated)
-    private let credentialMutationQueue = DispatchQueue(label: "com.vibeproxy.ultra.credential-mutations", qos: .userInitiated)
-    private let configInputStateQueue = DispatchQueue(label: "com.vibeproxy.ultra.config-input-state", qos: .userInitiated)
-    private let configResolutionQueue = DispatchQueue(label: "com.vibeproxy.ultra.config-resolution", qos: .userInitiated)
+    private let processQueue = DispatchQueue(label: "com.viberouter.server-process", qos: .userInitiated)
+    private let credentialMutationQueue = DispatchQueue(label: "com.viberouter.credential-mutations", qos: .userInitiated)
+    private let configInputStateQueue = DispatchQueue(label: "com.viberouter.config-input-state", qos: .userInitiated)
+    private let configResolutionQueue = DispatchQueue(label: "com.viberouter.config-resolution", qos: .userInitiated)
     private lazy var zaiAPIKeyStore = ZAIAPIKeyStore(directoryURL: authDirectoryURL())
     private lazy var customProviderCredentialStore = CustomProviderCredentialStore(directoryURL: authDirectoryURL())
     private var activeConfigPath = ""

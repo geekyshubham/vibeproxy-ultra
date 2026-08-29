@@ -14,7 +14,7 @@ enum RateLimitResetService {
         case failure(message: String)
     }
 
-    /// Providers whose reset banks VibeProxy can read today.
+    /// Providers whose reset banks VibeRouter can read today.
     static func supports(_ type: ServiceType) -> Bool {
         switch type {
         case .codex, .grok:

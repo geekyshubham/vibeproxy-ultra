@@ -50,7 +50,7 @@ struct AboutView: View {
         HStack(spacing: 14) {
             appIcon
             VStack(alignment: .leading, spacing: 3) {
-                Text("VibeProxy Ultra")
+                Text("VibeRouter")
                     .font(.title2.weight(.bold))
                 Text(version)
                     .font(.caption.monospacedDigit())
@@ -95,7 +95,7 @@ struct AboutView: View {
 
     private var featureBullets: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Why Ultra")
+            Text("Why VibeRouter")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             bullet("Live usage limits & reset countdowns (Codex, Claude Code, Gemini, Kiro, Copilot, more)")
@@ -160,13 +160,13 @@ struct AboutView: View {
     // MARK: - Product copy
 
     static let tagline =
-        "VibeProxy Ultra — macOS menu bar proxy with live AI usage limits, quotas, and analytics."
+        "VibeRouter — macOS menu bar proxy with live AI usage limits, quotas, and analytics."
 
     static let summary =
         "Route Claude Code, ChatGPT/Codex, Gemini, Antigravity, GitHub Copilot, Kiro, Grok, Z.AI, OpenCode, and more through a local proxy — with live usage limits, credit/token analytics, account switching, and session keep-alive."
 
     static let attribution =
-        "© 2026 Geekyshubham · VibeProxy Ultra · MIT License. Not affiliated with OpenAI, Anthropic, Google, xAI, GitHub, or any AI provider. Use at your own risk regarding provider terms of service."
+        "© 2026 Geekyshubham · VibeRouter · MIT License. Not affiliated with OpenAI, Anthropic, Google, xAI, GitHub, or any AI provider. Use at your own risk regarding provider terms of service."
 }
 
 // MARK: - Presenter
@@ -187,7 +187,7 @@ enum AboutWindowController {
             backing: .buffered,
             defer: false
         )
-        panel.title = "About VibeProxy Ultra"
+        panel.title = "About VibeRouter"
         panel.isReleasedWhenClosed = false
         panel.center()
         panel.contentView = NSHostingView(rootView: AboutView {

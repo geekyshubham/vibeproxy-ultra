@@ -41,7 +41,7 @@ final class ZAIAPIKeyStore {
     init(
         directoryURL: URL,
         fileManager: FileManager = .default,
-        queueLabel: String = "com.vibeproxy.ultra.zai-api-keys"
+        queueLabel: String = "com.viberouter.zai-api-keys"
     ) {
         self.directoryURL = directoryURL
         self.fileManager = fileManager

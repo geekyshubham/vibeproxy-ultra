@@ -79,7 +79,7 @@ export default function AccountsTab() {
           <LoadingBlock rows={4} />
         ) : files.length === 0 ? (
           <EmptyState Glyph={Icon.Users} title="No accounts yet">
-            Sign in to a provider from the VibeProxy menu bar. OAuth token files will appear here.
+            Sign in to a provider from the VibeRouter menu bar. OAuth token files will appear here.
           </EmptyState>
         ) : (
           <div className="stack">

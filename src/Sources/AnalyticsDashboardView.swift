@@ -216,7 +216,7 @@ struct AnalyticsDashboardView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("No local usage history yet")
                 .font(.subheadline.weight(.semibold))
-            Text("Use Claude Code, Codex, Grok CLI, Kiro CLI, OpenCode, Copilot, and more — Ultra scans local session logs for tokens, credits, models, and estimated API-equivalent spend.")
+            Text("Use Claude Code, Codex, Grok CLI, Kiro CLI, OpenCode, Copilot, and more — VibeRouter scans local session logs for tokens, credits, models, and estimated API-equivalent spend.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

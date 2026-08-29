@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Settings section: detect installed coding CLIs and one-click Autoconfigure to VibeProxy.
+/// Settings section: detect installed coding CLIs and one-click Autoconfigure to VibeRouter.
 struct CLIHarnessSettingsSection: View {
     var proxyPort: Int = 8317
 
@@ -19,7 +19,7 @@ struct CLIHarnessSettingsSection: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(harness.kind.displayName)
                             .font(.body.weight(.medium))
-                        Text(harness.isConfigured ? "Pointing at VibeProxy" : harness.kind.notes)
+                        Text(harness.isConfigured ? "Pointing at VibeRouter" : harness.kind.notes)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
@@ -76,7 +76,7 @@ struct CLIHarnessSettingsSection: View {
         } header: {
             Text("CLI tools → proxy")
         } footer: {
-            Text("Writes base URL http://127.0.0.1:\(proxyPort) into each tool’s config (backup: *.vibeproxy-bak). Management dashboard is separate (Open next to Management UI).")
+            Text("Writes base URL http://127.0.0.1:\(proxyPort) into each tool’s config (backup: *.viberouter-bak). Management dashboard is separate (Open next to Management UI).")
                 .font(.caption2)
         }
         .onAppear {

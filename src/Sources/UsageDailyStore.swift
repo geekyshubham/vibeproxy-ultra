@@ -10,7 +10,7 @@ import Foundation
 /// per-day detail lets history accumulate past the limit of any single scan.
 ///
 /// Storage layout mirrors `RemotePricingCatalog`'s disk cache (Application Support /
-/// VibeProxy, atomic writes) so there is one convention for cached state in this app.
+/// VibeRouter, atomic writes) so there is one convention for cached state in this app.
 enum UsageDailyStore {
     /// Bump when the on-disk shape changes; unknown versions are discarded, not guessed at.
     /// v2: same shape as v1, but v1 Claude rows were ~2.4× inflated (duplicate stream lines
@@ -40,7 +40,7 @@ enum UsageDailyStore {
         guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
-        let folder = dir.appendingPathComponent("VibeProxy", isDirectory: true)
+        let folder = dir.appendingPathComponent("VibeRouter", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder.appendingPathComponent("usage-daily.json")
     }

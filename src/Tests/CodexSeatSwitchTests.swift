@@ -293,7 +293,7 @@ final class CodexSeatSwitchTests: XCTestCase {
 
     func testCodexIdentityKeyIncludesAccountID() throws {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("vibeproxy-seat-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("viberouter-seat-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 

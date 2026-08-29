@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// embeddedManagementHTML is the VibeProxy Ultra management control panel, built
+// embeddedManagementHTML is the VibeRouter management control panel, built
 // from management-ui/ (single-file Vite build) and copied here at release time.
 // When present, it fully replaces the upstream GitHub-hosted panel: no runtime
 // download occurs and the auto-updater becomes a no-op that simply reconciles

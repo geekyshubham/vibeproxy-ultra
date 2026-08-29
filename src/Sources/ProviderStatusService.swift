@@ -103,7 +103,7 @@ enum ProviderStatusService {
         let displayName: String
         let statusPageBase: URL
         let mode: Mode
-        /// Which Ultra `ServiceType`s this status covers.
+        /// Which VibeRouter `ServiceType`s this status covers.
         let serviceTypes: [ServiceType]
     }
 
@@ -367,7 +367,7 @@ enum ProviderStatusService {
         request.timeoutInterval = 12
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("VibeProxyUltra/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("VibeRouter/1.0", forHTTPHeaderField: "User-Agent")
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else { return nil }
@@ -472,7 +472,7 @@ enum ProviderStatusService {
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         request.setValue(acceptJSON ? "application/json" : "*/*", forHTTPHeaderField: "Accept")
-        request.setValue("VibeProxyUltra/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("VibeRouter/1.0", forHTTPHeaderField: "User-Agent")
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else { return nil }
@@ -569,7 +569,7 @@ enum ProviderStatusService {
         request.timeoutInterval = 12
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) VibeProxyUltra/1.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) VibeRouter/1.0",
             forHTTPHeaderField: "User-Agent"
         )
         do {

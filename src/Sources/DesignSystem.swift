@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Design tokens
 
-/// Central design system for VibeProxy Ultra.
+/// Central design system for VibeRouter.
 ///
 /// Builds on the brand tokens in `MenuBarDesign` (indigo-violet accent, glass
 /// surfaces) with a consistent spacing / radius / motion scale and a small set of

@@ -283,7 +283,7 @@ enum QuotaWakeService {
         // Keep wake snappy — previous 90s timeouts made the button feel broken.
         request.timeoutInterval = 25
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer vibeproxy-wake", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer viberouter-wake", forHTTPHeaderField: "Authorization")
         let body: [String: Any] = [
             "model": model,
             "messages": [

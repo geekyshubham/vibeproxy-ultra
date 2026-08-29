@@ -1,5 +1,5 @@
 // ============================================================================
-// GenerateBrandAssets — the single source of truth for VibeProxy's brand marks.
+// GenerateBrandAssets — the single source of truth for VibeRouter's brand marks.
 //
 // There is no rasterizer on the build machines (no rsvg-convert / magick /
 // cairosvg), so the artwork is defined here as CoreGraphics drawing code and
@@ -8,7 +8,7 @@
 //   swiftc -O -o /tmp/genbrand scripts/GenerateBrandAssets.swift && /tmp/genbrand
 //
 // The mark is a "converge" glyph: three provider lines funnel into one line
-// that terminates in a port dot — VibeProxy multiplexing many AI providers onto
+// that terminates in a port dot — VibeRouter multiplexing many AI providers onto
 // one local port. Everything is derived from one geometry definition so the
 // Dock icon, the menu bar template, the About chip, the web BrandMark, and the
 // favicons cannot drift apart.

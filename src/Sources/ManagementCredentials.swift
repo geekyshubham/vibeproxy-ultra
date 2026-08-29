@@ -7,7 +7,7 @@ import Foundation
 enum ManagementCredentials {
     /// The globally-known default key shipped in this (public) repo. A network-
     /// exposed management API must never be protected by only this value.
-    static let defaultSecretKey = "vibeproxy-admin"
+    static let defaultSecretKey = "viberouter-admin"
 
     /// Default management key injected into merged-config.yaml.
     /// Enter this in the management.html login field (Authorization: Bearer …).

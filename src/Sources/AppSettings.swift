@@ -1,7 +1,7 @@
 import Foundation
 import Combine
 
-/// User-facing preferences for VibeProxy Ultra, persisted in `UserDefaults`.
+/// User-facing preferences for VibeRouter, persisted in `UserDefaults`.
 /// Kept intentionally small and observable so views update live and services
 /// (auto-refresh, wake scheduler, account switching) can read a single source of truth.
 final class AppSettings: ObservableObject {

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Detected coding CLI / IDE harness that can point at the local VibeProxy.
+/// Detected coding CLI / IDE harness that can point at the local VibeRouter.
 struct CLIHarness: Identifiable, Equatable {
     enum Kind: String, CaseIterable, Identifiable {
         case claudeCode
@@ -49,9 +49,9 @@ struct CLIHarness: Identifiable, Equatable {
             case .claudeCode:
                 return "Sets ANTHROPIC_BASE_URL in ~/.claude/settings.json"
             case .codex:
-                return "Adds a VibeProxy model_provider in ~/.codex/config.toml"
+                return "Adds a VibeRouter model_provider in ~/.codex/config.toml"
             case .openCode:
-                return "Adds a vibeproxy provider in ~/.config/opencode/opencode.json"
+                return "Adds a viberouter provider in ~/.config/opencode/opencode.json"
             case .geminiCLI:
                 return "Sets GEMINI_API_BASE / GOOGLE_GEMINI_BASE_URL in ~/.gemini/settings.json"
             case .factory:
@@ -75,10 +75,10 @@ struct CLIHarness: Identifiable, Equatable {
     var id: String { kind.rawValue }
 }
 
-/// Discovers local coding CLIs and rewrites their config to use VibeProxy.
+/// Discovers local coding CLIs and rewrites their config to use VibeRouter.
 enum CLIHarnessAutoconfigure {
-    static let dummyAPIKey = "vibeproxy"
-    private static let backupSuffix = ".vibeproxy-bak"
+    static let dummyAPIKey = "viberouter"
+    private static let backupSuffix = ".viberouter-bak"
 
     // MARK: - Discovery
 
@@ -188,41 +188,43 @@ enum CLIHarnessAutoconfigure {
         )
         try backupIfNeeded(url)
         var text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        text = renameLegacyProviderKey(inTOML: text)
 
         // Ensure model_provider + provider table. Avoid duplicating if already present.
-        if text.contains("model_providers.vibeproxy") || text.contains("[model_providers.vibeproxy]") {
-            // Update base_url lines inside the vibeproxy table (simple rewrite of known keys).
-            text = replaceOrAppendTOMLKey(in: text, key: "base_url", value: "\"\(baseURL)\"", section: "model_providers.vibeproxy")
-            if !text.contains("model_provider") || !text.contains("\"vibeproxy\"") {
+        if text.contains("model_providers.viberouter") || text.contains("[model_providers.viberouter]") {
+            // Update base_url lines inside the viberouter table (simple rewrite of known keys).
+            text = replaceOrAppendTOMLKey(in: text, key: "base_url", value: "\"\(baseURL)\"", section: "model_providers.viberouter")
+            if !text.contains("model_provider") || !text.contains("\"viberouter\"") {
                 if text.contains("model_provider") {
                     text = text.replacingOccurrences(
                         of: #"model_provider\s*=\s*"[^"]*""#,
-                        with: "model_provider = \"vibeproxy\"",
+                        with: "model_provider = \"viberouter\"",
                         options: .regularExpression
                     )
                 } else {
-                    text = "model_provider = \"vibeproxy\"\n" + text
+                    text = "model_provider = \"viberouter\"\n" + text
                 }
             }
         } else {
             let block = """
 
-            # --- VibeProxy Ultra (auto-configured) ---
-            model_provider = "vibeproxy"
+            # --- VibeRouter (auto-configured) ---
+            model_provider = "viberouter"
 
-            [model_providers.vibeproxy]
-            name = "VibeProxy"
+            [model_providers.viberouter]
+            name = "VibeRouter"
             base_url = "\(baseURL)"
             wire_api = "chat"
-            env_key = "VIBEPROXY_API_KEY"
+            env_key = "VIBEROUTER_API_KEY"
             """
             text += block
         }
         // Seed env file hint via empty optional — codex reads env_key from environment.
         // Also write a tiny sidecar for the key so users can export it.
-        let envHint = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/vibeproxy.env")
-        try "export VIBEPROXY_API_KEY=\"\(apiKey)\"\n".write(to: envHint, atomically: true, encoding: .utf8)
+        let codexHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+        let envHint = codexHome.appendingPathComponent("viberouter.env")
+        try "export VIBEROUTER_API_KEY=\"\(apiKey)\"\n".write(to: envHint, atomically: true, encoding: .utf8)
+        try? FileManager.default.removeItem(at: codexHome.appendingPathComponent(legacyProviderKey + ".env"))
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
@@ -258,9 +260,13 @@ enum CLIHarnessAutoconfigure {
             }
         }
 
-        provider["vibeproxy"] = [
+        provider.removeValue(forKey: legacyProviderKey)
+        if let pinned = root["model"] as? String, pinned.hasPrefix(legacyProviderKey + "/") {
+            root["model"] = providerKey + pinned.dropFirst(legacyProviderKey.count)
+        }
+        provider[providerKey] = [
             "npm": "@ai-sdk/openai-compatible",
-            "name": "VibeProxy Ultra",
+            "name": "VibeRouter",
             "options": [
                 "baseURL": baseURL,
                 "apiKey": apiKey,
@@ -272,7 +278,7 @@ enum CLIHarnessAutoconfigure {
             let preferred = resolveLiveModel(anthropicModelPreferences, port: proxyPort, available: modelIDs)
                 ?? models.keys.sorted().first
             if let preferred {
-                root["model"] = "vibeproxy/\(openCodeModelKey(preferred))"
+                root["model"] = "\(providerKey)/\(openCodeModelKey(preferred))"
             }
         }
         try writeJSON(root, to: url)
@@ -324,7 +330,7 @@ enum CLIHarnessAutoconfigure {
                 "provider": "openai",
             ])
         }
-        // Merge: replace previous VibeProxy-tagged entries, keep user custom models.
+        // Merge: replace previous VibeRouter-tagged entries, keep user custom models.
         let existing = root["custom_models"] as? [[String: Any]] ?? []
         let kept = existing.filter { entry in
             let name = (entry["model_display_name"] as? String) ?? ""
@@ -396,7 +402,8 @@ enum CLIHarnessAutoconfigure {
         let needleLocal = "localhost:\(proxyPort)"
         if kind == .codex {
             guard let text = try? String(contentsOf: configURL, encoding: .utf8) else { return false }
-            return text.contains("vibeproxy") && (text.contains(needle) || text.contains(needleLocal))
+            let named = text.contains(providerKey) || text.contains(legacyProviderKey)
+            return named && (text.contains(needle) || text.contains(needleLocal))
         }
         guard let text = try? String(contentsOf: configURL, encoding: .utf8) else { return false }
         return text.contains(needle) || text.contains(needleLocal)
@@ -420,6 +427,22 @@ enum CLIHarnessAutoconfigure {
         } catch {
             return nil
         }
+    }
+
+    /// Provider key written into harness configs. `legacyProviderKey` is the
+    /// pre-rename name, still present in configs written by older builds.
+    static let providerKey = "viberouter"
+    static let legacyProviderKey = "vibeproxy"
+
+    /// Converts a pre-rename Codex block in place. Appending a second provider
+    /// instead would leave two tables and an ambiguous `model_provider`.
+    static func renameLegacyProviderKey(inTOML text: String) -> String {
+        guard text.contains(legacyProviderKey) else { return text }
+        return text
+            .replacingOccurrences(of: "model_providers.\(legacyProviderKey)", with: "model_providers.\(providerKey)")
+            .replacingOccurrences(of: "model_provider = \"\(legacyProviderKey)\"", with: "model_provider = \"\(providerKey)\"")
+            .replacingOccurrences(of: "VIBEPROXY_API_KEY", with: "VIBEROUTER_API_KEY")
+            .replacingOccurrences(of: "# --- VibeProxy (auto-configured) ---", with: "# --- VibeRouter (auto-configured) ---")
     }
 
     /// Anthropic-format IDs to pin, best first. Must be plain catalog IDs: the

@@ -1,5 +1,5 @@
 /* ============================================================================
-   TopBar — sticky brand + status header (.topbar). Shows the VibeProxy glyph
+   TopBar — sticky brand + status header (.topbar). Shows the VibeRouter glyph
    mark, the console title, the live backend host, the usage date picker, and a
    logout control.
    ========================================================================== */
@@ -20,7 +20,7 @@ export default function TopBar() {
         <BrandMark />
       </div>
       <div className="titles">
-        <div className="t1">VibeProxy Ultra · Management</div>
+        <div className="t1">VibeRouter · Management</div>
         <div className="t2">
           <span className={`dot ${online ? 'ok pulse' : 'bad'}`} />
           <span>{online ? 'Connected' : 'Offline'}</span>

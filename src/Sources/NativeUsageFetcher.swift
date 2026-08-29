@@ -979,7 +979,7 @@ enum NativeUsageFetcher {
             request.setValue(authorization, forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             request.setValue("en-US,en", forHTTPHeaderField: "Accept-Language")
-            request.setValue("VibeProxyUltra/1.0", forHTTPHeaderField: "User-Agent")
+            request.setValue("VibeRouter/1.0", forHTTPHeaderField: "User-Agent")
 
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
@@ -1413,7 +1413,7 @@ enum NativeUsageFetcher {
         request.timeoutInterval = 30
         request.setValue("token \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("VibeProxyUltra/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("VibeRouter/1.0", forHTTPHeaderField: "User-Agent")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -1795,7 +1795,7 @@ enum NativeUsageFetcher {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         // opencode.ai sits behind Cloudflare and 1010-blocks default client agents.
-        request.setValue("VibeProxyUltra/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("VibeRouter/1.0", forHTTPHeaderField: "User-Agent")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)

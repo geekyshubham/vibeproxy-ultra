@@ -1,4 +1,4 @@
-# Installing VibeProxy Ultra
+# Installing VibeRouter
 
 **Requirements:** macOS 13+ · Apple Silicon *or* Intel builds on Releases.
 
@@ -6,13 +6,13 @@
 
 1. Open **[Geekyshubham/vibeproxy-ultra Releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)**
 2. Download for your Mac:
-   - Apple Silicon: `VibeProxy-arm64.dmg` or `VibeProxy-arm64.zip`
-   - Intel: `VibeProxy-x86_64.dmg` or `VibeProxy-x86_64.zip`
-3. Optional: `shasum -a 256 -c VibeProxy-arm64.zip.sha256`
+   - Apple Silicon: `VibeRouter-arm64.dmg` or `VibeRouter-arm64.zip`
+   - Intel: `VibeRouter-x86_64.dmg` or `VibeRouter-x86_64.zip`
+3. Optional: `shasum -a 256 -c VibeRouter-arm64.zip.sha256`
 
 ### Install
 
-**ZIP:** extract → drag `VibeProxy.app` to `/Applications` → launch  
+**ZIP:** extract → drag `VibeRouter.app` to `/Applications` → launch  
 
 **DMG:** open → drag to Applications → eject → launch  
 
@@ -21,9 +21,9 @@
 Releases are **ad-hoc signed**:
 
 ```bash
-xattr -cr /Applications/VibeProxy.app
+xattr -cr /Applications/VibeRouter.app
 # or
-xattr -cr "/Applications/VibeProxy Ultra.app"
+xattr -cr "/Applications/VibeRouter.app"
 ```
 
 Or **Right-click → Open → Open**.
@@ -63,4 +63,4 @@ APP_VERSION=1.1.0 ./scripts/build-release-artifacts.sh
 - Issues: [github.com/Geekyshubham/vibeproxy-ultra/issues](https://github.com/Geekyshubham/vibeproxy-ultra/issues)  
 - Releases: [github.com/Geekyshubham/vibeproxy-ultra/releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)
 
-© 2026 Geekyshubham · VibeProxy Ultra · MIT
+© 2026 Geekyshubham · VibeRouter · MIT

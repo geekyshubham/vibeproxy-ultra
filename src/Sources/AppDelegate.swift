@@ -28,7 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     private var polledConfigInputsFingerprint = ""
     
     override init() {
-        // Sparkle auto-checks disabled (no feed configured for Ultra).
+        // Sparkle auto-checks disabled (no feed configured for VibeRouter).
         self.updaterController = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
         super.init()
     }
@@ -239,9 +239,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         // App menu
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(NSMenuItem(title: "About VibeProxy Ultra", action: #selector(showAbout), keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem(title: "About VibeRouter", action: #selector(showAbout), keyEquivalent: ""))
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(NSMenuItem(title: "Quit VibeProxy Ultra", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        appMenu.addItem(NSMenuItem(title: "Quit VibeRouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
         
@@ -267,11 +267,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
         if let button = statusItem.button {
             button.imagePosition = .imageOnly
-            button.toolTip = "VibeProxy Ultra — click for accounts & usage"
+            button.toolTip = "VibeRouter — click for accounts & usage"
             if let icon = IconCatalog.shared.image(named: "icon-inactive.png", resizedTo: NSSize(width: 18, height: 18), template: true) {
                 button.image = icon
             } else {
-                let fallback = NSImage(systemSymbolName: "network.slash", accessibilityDescription: "VibeProxy Ultra")
+                let fallback = NSImage(systemSymbolName: "network.slash", accessibilityDescription: "VibeRouter")
                 fallback?.isTemplate = true
                 button.image = fallback
                 NSLog("[MenuBar] Failed to load inactive icon from bundle; using fallback system icon")
@@ -302,7 +302,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             backing: .buffered,
             defer: false
         )
-        window.title = "VibeProxy Ultra"
+        window.title = "VibeRouter"
         window.setContentSize(NSSize(width: 640, height: 720))
         window.minSize = NSSize(width: 560, height: 560)
         window.center()
@@ -354,7 +354,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
                     if success {
                         self?.updateMenuBarStatus()
                         // User always connects to 8317 (thinking proxy)
-                        self?.showNotification(title: "Server Started", body: "VibeProxy Ultra is now running")
+                        self?.showNotification(title: "Server Started", body: "VibeRouter is now running")
                     } else {
                         // Backend failed - stop the proxy to keep state consistent
                         self?.thinkingProxy.stop()
@@ -461,7 +461,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         content.sound = .default
         
         let request = UNNotificationRequest(
-            identifier: "com.vibeproxy.ultra.\(UUID().uuidString)",
+            identifier: "com.viberouter.\(UUID().uuidString)",
             content: content,
             trigger: nil
         )

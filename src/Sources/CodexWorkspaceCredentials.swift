@@ -7,7 +7,7 @@ import Foundation
 /// OpenAI encodes the seat in the access-token JWT; writing only `tokens.account_id` while keeping
 /// another seat's JWT does not switch billing or usage.
 ///
-/// VibeProxy mirrors that model:
+/// VibeRouter mirrors that model:
 /// - Discover seat lineages under `~/.cli-proxy-api/codex-*.json` and Cockpit's
 ///   `~/.antigravity_cockpit/codex_accounts/*.json`
 /// - Materialize each seat to its own auth file so UI dedupe does not collapse them by email

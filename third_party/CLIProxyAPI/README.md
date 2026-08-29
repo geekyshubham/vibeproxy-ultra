@@ -130,7 +130,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 Those projects are based on CLIProxyAPI:
 
-### [vibeproxy](https://github.com/automazeio/vibeproxy)
+### [viberouter](https://github.com/automazeio/viberouter)
 
 Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with AI coding tools - no API keys needed
 

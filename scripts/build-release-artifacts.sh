@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build VibeProxy Ultra release artifacts for arm64 and x86_64 (zip + dmg + sha256).
+# Build VibeRouter release artifacts for arm64 and x86_64 (zip + dmg + sha256).
 # Ad-hoc signed only unless CODESIGN_IDENTITY is set (no Apple notarization secrets required).
 set -euo pipefail
 
@@ -15,14 +15,14 @@ BACKUP_BINARY="$(mktemp)"
 # Must match APP_NAME in create-app-bundle.sh. Contains a SPACE, so every path
 # built from it stays quoted — an unquoted use would split into two arguments and
 # silently operate on the wrong path.
-APP_BUNDLE="VibeProxy Ultra.app"
+APP_BUNDLE="VibeRouter.app"
 # Downloadable artifacts keep a space-free stem: it survives URLs without %20
 # escaping and matches the asset names used by earlier releases.
-ARTIFACT_STEM="VibeProxy"
+ARTIFACT_STEM="VibeRouter"
 
 GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 
-echo -e "${BLUE}📦 VibeProxy Ultra release build v${VERSION}${NC}"
+echo -e "${BLUE}📦 VibeRouter release build v${VERSION}${NC}"
 mkdir -p "$OUT_DIR"
 # Preserve the committed binary and restore it after building all arches so the
 # working tree isn't left holding whichever arch was built last.
@@ -52,7 +52,7 @@ make_dmg() {
     cp "$RESOURCES/AppIcon.icns" "$stage/.VolumeIcon.icns"
   fi
   # Simple UDZO dmg (no Applications symlink required for usability)
-  hdiutil create -volname "VibeProxy Ultra" -srcfolder "$stage" -ov -format UDZO "$dmg_path" >/dev/null
+  hdiutil create -volname "VibeRouter" -srcfolder "$stage" -ov -format UDZO "$dmg_path" >/dev/null
   rm -rf "$stage"
 }
 

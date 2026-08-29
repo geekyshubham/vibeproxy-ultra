@@ -13,10 +13,10 @@ NC='\033[0m'
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$PROJECT_DIR/src"
 # The bundle filename is the user-visible app name in Finder and the Dock, so it
-# matches CFBundleName/CFBundleDisplayName in src/Info.plist ("VibeProxy Ultra").
+# matches CFBundleName/CFBundleDisplayName in src/Info.plist ("VibeRouter").
 # NOTE: this contains a SPACE — every path built from it must stay quoted, here and
 # in scripts/build-release-artifacts.sh and .github/workflows/release.yml.
-APP_NAME="VibeProxy Ultra"
+APP_NAME="VibeRouter"
 BUNDLE_ID="com.cliproxyapi.menubar"
 BUILD_DIR="$SRC_DIR/.build/release"
 APP_DIR="$PROJECT_DIR/$APP_NAME.app"
@@ -117,7 +117,7 @@ echo -e "${BLUE}Setting version to: ${VERSION} (build ${BUILD_NUMBER})${NC}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "$APP_DIR/Contents/Info.plist"
 
-# Sparkle auto-checks disabled for VibeProxy Ultra (empty feed).
+# Sparkle auto-checks disabled for VibeRouter (empty feed).
 TARGET_ARCH="${TARGET_ARCH:-arm64}"
 echo -e "${YELLOW}Sparkle auto-update checks disabled${NC}"
 /usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true

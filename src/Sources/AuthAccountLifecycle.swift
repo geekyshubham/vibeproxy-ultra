@@ -7,7 +7,8 @@ import Foundation
 /// 2. OAuth re-login looks like a "no-op" because the new file is collapsed with an old seat
 /// 3. Cockpit auto-materialize fights explicit user deletes
 enum AuthAccountLifecycle {
-    private static let tombstoneFileName = ".vibeproxy-deleted-seats.json"
+    private static let tombstoneFileName = ".viberouter-deleted-seats.json"
+    private static let legacyTombstoneFileName = ".vibeproxy-deleted-seats.json"
     private static let tombstoneKey = "seats"
 
     // MARK: - Public API
@@ -285,12 +286,24 @@ enum AuthAccountLifecycle {
     // MARK: - Tombstones
 
     static func loadTombstones(authDirectory: URL? = nil) -> Set<String> {
-        let url = (authDirectory ?? defaultAuthDirectory()).appendingPathComponent(tombstoneFileName)
+        let directory = authDirectory ?? defaultAuthDirectory()
+        migrateLegacyTombstoneFile(in: directory)
+        let url = directory.appendingPathComponent(tombstoneFileName)
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let seats = json[tombstoneKey] as? [String]
         else { return [] }
         return Set(seats.map { $0.lowercased() })
+    }
+
+    /// Pre-rename builds wrote `.vibeproxy-deleted-seats.json`. Without this the
+    /// list reads as empty and every previously deleted seat reappears.
+    private static func migrateLegacyTombstoneFile(in directory: URL) {
+        let current = directory.appendingPathComponent(tombstoneFileName)
+        let legacy = directory.appendingPathComponent(legacyTombstoneFileName)
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: current.path), fm.fileExists(atPath: legacy.path) else { return }
+        try? fm.moveItem(at: legacy, to: current)
     }
 
     private static func addTombstone(_ key: String, authDirectory: URL) {

@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FETCHER = ROOT / "Sources" / "NativeUsageFetcher.swift"
 AUTH_STATUS = ROOT / "Sources" / "AuthStatus.swift"
 USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
-USER_AGENT = "VibeProxyUltra/1.0"
+USER_AGENT = "VibeRouter/1.0"
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:

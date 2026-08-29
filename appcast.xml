@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
   <channel>
-    <title>VibeProxy Ultra Updates</title>
+    <title>VibeRouter Updates</title>
     <link>https://github.com/Geekyshubham/vibeproxy-ultra/releases</link>
-    <description>VibeProxy Ultra release feed (Sparkle auto-update disabled in-app; install from GitHub Releases).</description>
+    <description>VibeRouter release feed (Sparkle auto-update disabled in-app; install from GitHub Releases).</description>
     <language>en</language>
   </channel>
 </rss>

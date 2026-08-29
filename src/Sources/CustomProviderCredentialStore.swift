@@ -58,7 +58,7 @@ final class CustomProviderCredentialStore {
     init(
         directoryURL: URL,
         fileManager: FileManager = .default,
-        queueLabel: String = "com.vibeproxy.ultra.custom-provider-credentials"
+        queueLabel: String = "com.viberouter.custom-provider-credentials"
     ) {
         self.directoryURL = directoryURL
         self.fileManager = fileManager

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the custom cli-proxy-api-plus binary WITH the VibeProxy Ultra management
+# Build the custom cli-proxy-api-plus binary WITH the VibeRouter management
 # UI embedded, from the vendored CLIProxyAPI fork in third_party/CLIProxyAPI.
 #
 # This REPLACES the old "download the stock upstream binary" step: the stock
@@ -19,7 +19,7 @@ OUT="${2:-$PROJECT_DIR/src/Sources/Resources/cli-proxy-api-plus}"
 FORK_DIR="$PROJECT_DIR/third_party/CLIProxyAPI"
 UI_DIR="$PROJECT_DIR/management-ui"
 EMBED_TARGET="$FORK_DIR/internal/managementasset/management.html"
-MARKER="VibeProxy Ultra"
+MARKER="VibeRouter"
 
 # Normalize arch to GOARCH.
 case "$ARCH_IN" in

@@ -12,7 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Per-date usage reporting for the VibeProxy Ultra management console.
+// Per-date usage reporting for the VibeRouter management console.
 //
 // The data is produced by the macOS app (UsageDailyStore.swift), which scans local CLI
 // session logs and writes an accumulating day history to Application Support. This
@@ -250,7 +250,7 @@ func loadUsageDailyFile() (*usageDailyFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(home, "Library", "Application Support", "VibeProxy", usageDailyFileName)
+	path := filepath.Join(home, "Library", "Application Support", "VibeRouter", usageDailyFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

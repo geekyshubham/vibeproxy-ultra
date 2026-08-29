@@ -133,7 +133,7 @@ struct RateLimitResetBank: Equatable {
     let nextExpiresAt: Date?
     /// Product title e.g. "Full reset (Weekly + 5 hr)".
     let sampleTitle: String?
-    /// Whether VibeProxy can redeem/consume a reset programmatically.
+    /// Whether VibeRouter can redeem/consume a reset programmatically.
     let canRedeem: Bool
 
     init(

@@ -84,8 +84,8 @@ jobs:
           set -e
           # Bundle name matches APP_NAME in create-app-bundle.sh and contains a
           # SPACE, so every path referencing it must stay quoted.
-          BIN="VibeProxy Ultra.app/Contents/Resources/cli-proxy-api-plus"
-          if ! grep -a -q 'VibeProxy Ultra' "$BIN"; then
+          BIN="VibeRouter.app/Contents/Resources/cli-proxy-api-plus"
+          if ! grep -a -q 'VibeRouter' "$BIN"; then
             echo "::error:: bundled cli-proxy-api-plus is MISSING the custom management UI (stock upstream detected) — refusing to ship" >&2
             exit 1
           fi
@@ -93,16 +93,16 @@ jobs:
 
       - name: Verify Code Signature
         run: |
-          codesign --verify --deep --strict --verbose=2 "VibeProxy Ultra.app"
-          codesign -dv --verbose=4 "VibeProxy Ultra.app"
-          spctl -a -vvv -t install "VibeProxy Ultra.app" || echo "⚠️ Gatekeeper check failed (expected without notarization)"
+          codesign --verify --deep --strict --verbose=2 "VibeRouter.app"
+          codesign -dv --verbose=4 "VibeRouter.app"
+          spctl -a -vvv -t install "VibeRouter.app" || echo "⚠️ Gatekeeper check failed (expected without notarization)"
 
       - name: Notarize App
         run: |
-          ditto -c -k --sequesterRsrc --keepParent "VibeProxy Ultra.app" "VibeProxy-notarize.zip"
+          ditto -c -k --sequesterRsrc --keepParent "VibeRouter.app" "VibeRouter-notarize.zip"
           
           echo "Submitting app for notarization..."
-          SUBMIT_OUTPUT=$(xcrun notarytool submit "VibeProxy-notarize.zip" \
+          SUBMIT_OUTPUT=$(xcrun notarytool submit "VibeRouter-notarize.zip" \
             --apple-id "${{ secrets.APPLE_ID }}" \
             --team-id "${{ secrets.APPLE_TEAM_ID }}" \
             --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
@@ -123,44 +123,44 @@ jobs:
           fi
           
           echo "✅ Notarization succeeded! Stapling ticket..."
-          xcrun stapler staple "VibeProxy Ultra.app"
-          xcrun stapler validate "VibeProxy Ultra.app"
+          xcrun stapler staple "VibeRouter.app"
+          xcrun stapler validate "VibeRouter.app"
           echo "✅ App successfully notarized and stapled!"
           
-          rm "VibeProxy-notarize.zip"
+          rm "VibeRouter-notarize.zip"
 
       - name: Create DMG
         run: |
           brew install create-dmg
 
           create-dmg \
-            --volname "VibeProxy Ultra" \
+            --volname "VibeRouter" \
             --volicon "icon.png" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
-            --icon "VibeProxy Ultra.app" 175 120 \
-            --hide-extension "VibeProxy Ultra.app" \
+            --icon "VibeRouter.app" 175 120 \
+            --hide-extension "VibeRouter.app" \
             --app-drop-link 425 120 \
             --codesign "${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}" \
-            "VibeProxy-${{ matrix.arch }}.dmg" \
-            "VibeProxy Ultra.app" || true
+            "VibeRouter-${{ matrix.arch }}.dmg" \
+            "VibeRouter.app" || true
 
-          if [ -f "VibeProxy-${{ matrix.arch }}.dmg" ]; then
+          if [ -f "VibeRouter-${{ matrix.arch }}.dmg" ]; then
             echo "✅ DMG created successfully"
-            codesign -dv "VibeProxy-${{ matrix.arch }}.dmg" || echo "⚠️ DMG not signed (non-fatal)"
+            codesign -dv "VibeRouter-${{ matrix.arch }}.dmg" || echo "⚠️ DMG not signed (non-fatal)"
           fi
 
       - name: Create ZIP archive
         run: |
           # Archive keeps a space-free name so its download URL needs no %20 escaping.
-          ditto -c -k --sequesterRsrc --keepParent "VibeProxy Ultra.app" "VibeProxy-${{ matrix.arch }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "VibeRouter.app" "VibeRouter-${{ matrix.arch }}.zip"
 
       - name: Calculate checksums
         run: |
-          shasum -a 256 VibeProxy-${{ matrix.arch }}.zip > VibeProxy-${{ matrix.arch }}.zip.sha256
-          if [ -f "VibeProxy-${{ matrix.arch }}.dmg" ]; then
-            shasum -a 256 VibeProxy-${{ matrix.arch }}.dmg > VibeProxy-${{ matrix.arch }}.dmg.sha256
+          shasum -a 256 VibeRouter-${{ matrix.arch }}.zip > VibeRouter-${{ matrix.arch }}.zip.sha256
+          if [ -f "VibeRouter-${{ matrix.arch }}.dmg" ]; then
+            shasum -a 256 VibeRouter-${{ matrix.arch }}.dmg > VibeRouter-${{ matrix.arch }}.dmg.sha256
           fi
 
       - name: Sign update for Sparkle
@@ -177,10 +177,10 @@ jobs:
           fi
           
           echo "Using sign_update: $SIGN_UPDATE"
-          SIGNATURE=$(echo "$SPARKLE_PRIVATE_KEY" | "$SIGN_UPDATE" VibeProxy-${{ matrix.arch }}.zip --ed-key-file -)
+          SIGNATURE=$(echo "$SPARKLE_PRIVATE_KEY" | "$SIGN_UPDATE" VibeRouter-${{ matrix.arch }}.zip --ed-key-file -)
           
           ED_SIGNATURE=$(echo "$SIGNATURE" | grep -o 'sparkle:edSignature="[^"]*"' | sed 's/sparkle:edSignature="//;s/"$//')
-          LENGTH=$(stat -f%z VibeProxy-${{ matrix.arch }}.zip)
+          LENGTH=$(stat -f%z VibeRouter-${{ matrix.arch }}.zip)
           
           echo "ed_signature=$ED_SIGNATURE" >> $GITHUB_OUTPUT
           echo "length=$LENGTH" >> $GITHUB_OUTPUT
@@ -189,12 +189,12 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: vibeproxy-${{ matrix.arch }}
+          name: viberouter-${{ matrix.arch }}
           path: |
-            VibeProxy-${{ matrix.arch }}.zip
-            VibeProxy-${{ matrix.arch }}.zip.sha256
-            VibeProxy-${{ matrix.arch }}.dmg
-            VibeProxy-${{ matrix.arch }}.dmg.sha256
+            VibeRouter-${{ matrix.arch }}.zip
+            VibeRouter-${{ matrix.arch }}.zip.sha256
+            VibeRouter-${{ matrix.arch }}.dmg
+            VibeRouter-${{ matrix.arch }}.dmg.sha256
           retention-days: 1
 
       - name: Save Sparkle signature
@@ -237,8 +237,8 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          cp artifacts/vibeproxy-arm64/* release/
-          cp artifacts/vibeproxy-x86_64/* release/
+          cp artifacts/viberouter-arm64/* release/
+          cp artifacts/viberouter-x86_64/* release/
           ls -la release/
 
       - name: Download Sparkle signatures
@@ -268,7 +268,7 @@ jobs:
                 <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
                 <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
                 <pubDate>${TODAY}</pubDate>
-                <enclosure url="https://github.com/Geekyshubham/vibeproxy-ultra/releases/download/v${VERSION}/VibeProxy-arm64.zip"
+                <enclosure url="https://github.com/Geekyshubham/vibeproxy-ultra/releases/download/v${VERSION}/VibeRouter-arm64.zip"
                            type="application/octet-stream"
                            sparkle:edSignature="${ARM64_SIGNATURE}"
                            length="${ARM64_LENGTH}"/>
@@ -287,9 +287,9 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
             <channel>
-              <title>VibeProxy Ultra Updates (Intel)</title>
+              <title>VibeRouter Updates (Intel)</title>
               <link>https://github.com/Geekyshubham/vibeproxy-ultra/releases</link>
-              <description>Most recent updates to VibeProxy Ultra for Intel Macs</description>
+              <description>Most recent updates to VibeRouter for Intel Macs</description>
               <language>en</language>
             </channel>
           </rss>
@@ -304,7 +304,7 @@ jobs:
                 <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
                 <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
                 <pubDate>${TODAY}</pubDate>
-                <enclosure url="https://github.com/Geekyshubham/vibeproxy-ultra/releases/download/v${VERSION}/VibeProxy-x86_64.zip"
+                <enclosure url="https://github.com/Geekyshubham/vibeproxy-ultra/releases/download/v${VERSION}/VibeRouter-x86_64.zip"
                            type="application/octet-stream"
                            sparkle:edSignature="${X86_64_SIGNATURE}"
                            length="${X86_64_LENGTH}"/>
@@ -334,26 +334,26 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            release/VibeProxy-arm64.zip
-            release/VibeProxy-arm64.zip.sha256
-            release/VibeProxy-arm64.dmg
-            release/VibeProxy-arm64.dmg.sha256
-            release/VibeProxy-x86_64.zip
-            release/VibeProxy-x86_64.zip.sha256
-            release/VibeProxy-x86_64.dmg
-            release/VibeProxy-x86_64.dmg.sha256
+            release/VibeRouter-arm64.zip
+            release/VibeRouter-arm64.zip.sha256
+            release/VibeRouter-arm64.dmg
+            release/VibeRouter-arm64.dmg.sha256
+            release/VibeRouter-x86_64.zip
+            release/VibeRouter-x86_64.zip.sha256
+            release/VibeRouter-x86_64.dmg
+            release/VibeRouter-x86_64.dmg.sha256
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
-            ## VibeProxy Ultra ${{ steps.get_version.outputs.VERSION }}
+            ## VibeRouter ${{ steps.get_version.outputs.VERSION }}
 
             ### Downloads
 
             | Architecture | DMG | ZIP |
             |--------------|-----|-----|
-            | **Apple Silicon** (M1/M2/M3/M4) | `VibeProxy-arm64.dmg` | `VibeProxy-arm64.zip` |
-            | **Intel** (x86_64) | `VibeProxy-x86_64.dmg` | `VibeProxy-x86_64.zip` |
+            | **Apple Silicon** (M1/M2/M3/M4) | `VibeRouter-arm64.dmg` | `VibeRouter-arm64.zip` |
+            | **Intel** (x86_64) | `VibeRouter-x86_64.dmg` | `VibeRouter-x86_64.zip` |
 
             ### Installation
 
@@ -371,7 +371,7 @@ jobs:
             This release is **code signed** with Apple Developer ID and includes SHA-256 checksums.
 
             ```bash
-            shasum -a 256 -c VibeProxy-arm64.zip.sha256
+            shasum -a 256 -c VibeRouter-arm64.zip.sha256
             ```
 
             ---

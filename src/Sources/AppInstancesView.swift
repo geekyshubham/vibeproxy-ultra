@@ -13,7 +13,7 @@ struct AppInstancesView: View {
     var body: some View {
         Form {
             Section {
-                Text("Run several copies of the same app at once, each with its own profile and (optionally) a bound VibeProxy account. Same idea as Cockpit Tools multi-instance.")
+                Text("Run several copies of the same app at once, each with its own profile and (optionally) a bound VibeRouter account. Same idea as Cockpit Tools multi-instance.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

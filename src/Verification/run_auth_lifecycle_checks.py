@@ -54,7 +54,7 @@ def write_auth(path: Path, *, email: str, account_id: str, plan: str, user_id: s
 
 
 def load_tombstones(auth_dir: Path) -> set[str]:
-    p = auth_dir / ".vibeproxy-deleted-seats.json"
+    p = auth_dir / ".viberouter-deleted-seats.json"
     if not p.exists():
         return set()
     data = json.loads(p.read_text())
@@ -62,7 +62,7 @@ def load_tombstones(auth_dir: Path) -> set[str]:
 
 
 def save_tombstones(auth_dir: Path, seats: set[str]) -> None:
-    p = auth_dir / ".vibeproxy-deleted-seats.json"
+    p = auth_dir / ".viberouter-deleted-seats.json"
     p.write_text(
         json.dumps(
             {"seats": sorted(seats), "updated_at": datetime.now(timezone.utc).isoformat()},

@@ -1,7 +1,7 @@
 /* ============================================================================
    LoginGate — the unauthenticated screen. Accepts the management secret key and
    validates it via AuthContext.login (which probes GET /config). Errors render
-   inline; the VibeProxy glyph is the hero mark.
+   inline; the VibeRouter glyph is the hero mark.
    ========================================================================== */
 import { useState, type FormEvent } from 'react';
 import { useAuth } from '../context/AuthContext';
@@ -36,7 +36,7 @@ export default function LoginGate() {
         <div className="gate-logo">
           <BrandMark size={26} />
         </div>
-        <h1>VibeProxy Ultra</h1>
+        <h1>VibeRouter</h1>
         <p className="lede">Enter your management key to open the console.</p>
 
         <div className="field">
@@ -46,7 +46,7 @@ export default function LoginGate() {
             className="inp mono"
             type="password"
             autoComplete="current-password"
-            placeholder="vibeproxy-admin"
+            placeholder="viberouter-admin"
             value={value}
             onChange={(e) => setValue(e.target.value)}
             autoFocus

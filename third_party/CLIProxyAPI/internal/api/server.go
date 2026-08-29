@@ -752,7 +752,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		return
 	}
 
-	// VibeProxy Ultra: when a control panel is compiled into the binary, reconcile
+	// VibeRouter: when a control panel is compiled into the binary, reconcile
 	// the on-disk copy against the embedded bytes on every serve. This replaces any
 	// stale panel previously downloaded from GitHub and performs no network I/O.
 	_, statErr := os.Stat(filePath)

@@ -286,7 +286,7 @@ struct UsageByDateView: View {
             // is expected, not a bug.
             Text(
                 usageStore.earliestDayWithUsage == nil
-                    ? "History builds as VibeProxy scans your CLI sessions."
+                    ? "History builds as VibeRouter scans your CLI sessions."
                     : "Recorded history starts \(usageStore.earliestDayWithUsage?.value ?? "—")."
             )
             .font(.system(size: 9))

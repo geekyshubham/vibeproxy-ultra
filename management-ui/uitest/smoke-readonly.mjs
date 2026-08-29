@@ -4,7 +4,7 @@
 import { chromium } from 'playwright';
 
 const BASE = 'http://127.0.0.1:8318';
-const KEY = process.argv[2] || 'vibeproxy-admin';
+const KEY = process.argv[2] || 'viberouter-admin';
 const out = [];
 const rec = (n, ok, d = '') => { out.push({ n, ok }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${d ? ' — ' + d : ''}`); };
 

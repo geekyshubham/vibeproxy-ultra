@@ -170,7 +170,7 @@ enum RemotePricingCatalog {
         guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
-        let folder = dir.appendingPathComponent("VibeProxy", isDirectory: true)
+        let folder = dir.appendingPathComponent("VibeRouter", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder.appendingPathComponent("pricing-cache.json")
     }

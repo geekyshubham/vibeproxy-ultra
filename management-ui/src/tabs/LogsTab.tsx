@@ -65,7 +65,7 @@ export default function LogsTab() {
         <SectionHeader
           Glyph={Icon.List}
           title="Request logs"
-          sub="Recent calls proxied through VibeProxy"
+          sub="Recent calls proxied through VibeRouter"
           trail={
             <div className="row">
               <span className="small">File logging</span>

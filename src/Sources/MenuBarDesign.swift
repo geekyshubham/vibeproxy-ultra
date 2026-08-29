@@ -8,7 +8,7 @@ enum MenuBarDesign {
     static let cardPadding: CGFloat = 12
     static let sectionSpacing: CGFloat = 12
 
-    /// Indigo-violet Ultra accent (CodexBar-adjacent premium feel).
+    /// Indigo-violet VibeRouter accent (CodexBar-adjacent premium feel).
     static let accent = Color(red: 0.45, green: 0.42, blue: 0.98)
     static let success = Color(red: 0.18, green: 0.80, blue: 0.52)
     static let warning = Color(red: 0.98, green: 0.68, blue: 0.16)

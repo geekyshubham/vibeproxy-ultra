@@ -114,7 +114,7 @@ struct MenuBarPanelView: View {
                 size: 9
             )
             VStack(alignment: .leading, spacing: 2) {
-                Text("VibeProxy Ultra")
+                Text("VibeRouter")
                     .font(.headline)
                 // Use String(port) so SwiftUI LocalizedStringKey does not locale-format
                 // the integer (e.g. "8,337" instead of "8337").
@@ -445,7 +445,7 @@ struct MenuBarPanelView: View {
                 Image(systemName: "power")
             }
             .buttonStyle(IconActionButtonStyle(tint: MenuBarDesign.danger))
-            .help("Quit VibeProxy Ultra")
+            .help("Quit VibeRouter")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

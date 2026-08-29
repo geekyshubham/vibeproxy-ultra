@@ -208,7 +208,7 @@ type RemoteManagement struct {
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
 	// DisableAuth turns off the management key requirement for LOCAL requests only.
-	// VibeProxy Ultra: the console is a localhost tool, so a login prompt adds friction
+	// VibeRouter: the console is a localhost tool, so a login prompt adds friction
 	// without adding protection. Remote requests are still rejected while this is true,
 	// even when AllowRemote is set, because the management API hands out plaintext API
 	// keys and linked accounts.

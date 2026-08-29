@@ -1,7 +1,7 @@
-# VibeProxy Ultra
+# VibeRouter
 
 <p align="center">
-  <img src="icon.png" width="128" height="128" alt="VibeProxy Ultra">
+  <img src="icon.png" width="128" height="128" alt="VibeRouter">
 </p>
 
 <p align="center">
@@ -9,13 +9,13 @@
 </p>
 
 <p align="center">
-<a href="https://github.com/Geekyshubham/vibeproxy-ultra/releases"><img alt="Download VibeProxy Ultra" src="https://img.shields.io/github/v/release/Geekyshubham/vibeproxy-ultra?label=Download&color=6c5ce7"></a>
+<a href="https://github.com/Geekyshubham/vibeproxy-ultra/releases"><img alt="Download VibeRouter" src="https://img.shields.io/github/v/release/Geekyshubham/vibeproxy-ultra?label=Download&color=6c5ce7"></a>
 <a href="https://github.com/Geekyshubham/vibeproxy-ultra/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-28a745"></a>
 <a href="https://github.com/Geekyshubham/vibeproxy-ultra/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Geekyshubham/vibeproxy-ultra?style=social"></a>
 <a href="https://github.com/Geekyshubham/vibeproxy-ultra/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Geekyshubham/vibeproxy-ultra/total?label=downloads"></a>
 </p>
 
-**VibeProxy Ultra** by **Geekyshubham** — use Claude Code, ChatGPT/Codex, Gemini, Antigravity, Grok, Z.AI, OpenCode, and more with local tools. **No separate API keys** for OAuth providers. Kiro and GitHub Copilot are tracked for usage and credits only — the bundled proxy cannot route requests to them.
+**VibeRouter** by **Geekyshubham** — use Claude Code, ChatGPT/Codex, Gemini, Antigravity, Grok, Z.AI, OpenCode, and more with local tools. **No separate API keys** for OAuth providers. Kiro and GitHub Copilot are tracked for usage and credits only — the bundled proxy cannot route requests to them.
 
 > Live usage limits · reset countdowns · token/credit analytics · account import & switch · session keep-alive · provider status
 
@@ -50,7 +50,7 @@ Also: one-click server start/stop, multi-account round-robin, provider enable/di
 
 **Releases:** [github.com/Geekyshubham/vibeproxy-ultra/releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)
 
-Ad-hoc signed. First open: **Right-click → Open**, or `xattr -cr /Applications/VibeProxy.app`.
+Ad-hoc signed. First open: **Right-click → Open**, or `xattr -cr /Applications/VibeRouter.app`.
 
 ---
 
@@ -65,7 +65,7 @@ Ad-hoc signed. First open: **Right-click → Open**, or `xattr -cr /Applications
 
 1. Open **[Releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)**
 2. Download arm64 or x86_64 DMG/ZIP
-3. Drag `VibeProxy.app` to **Applications** → launch
+3. Drag `VibeRouter.app` to **Applications** → launch
 
 ### From source
 
@@ -99,7 +99,7 @@ Guides: [Factory CLI](FACTORY_SETUP.md) · [Amp CLI](AMPCODE_SETUP.md)
 
 ## License
 
-**MIT** · © 2026 Geekyshubham / VibeProxy Ultra — see [LICENSE](LICENSE).
+**MIT** · © 2026 Geekyshubham / VibeRouter — see [LICENSE](LICENSE).
 
 Not affiliated with OpenAI, Anthropic, Google, xAI, GitHub, or other AI providers.  
 Proxying subscriptions may violate provider ToS — use at your own risk.
@@ -111,4 +111,4 @@ Proxying subscriptions may violate provider ToS — use at your own risk.
 
 ---
 
-© 2026 Geekyshubham · **VibeProxy Ultra**
+© 2026 Geekyshubham · **VibeRouter**

@@ -13,7 +13,7 @@ amp-restrict-management-to-localhost: true
 # Plaintext is bcrypt-hashed by CLIProxyAPI on first load.
 remote-management:
   allow-remote: false
-  secret-key: "vibeproxy-admin"
+  secret-key: "viberouter-admin"
 
 # Authentication directory (stores OAuth tokens)
 auth-dir: "~/.cli-proxy-api"

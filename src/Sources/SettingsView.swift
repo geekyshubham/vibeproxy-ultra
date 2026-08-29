@@ -604,7 +604,7 @@ struct SettingsView: View {
     @ViewBuilder
     private var settingsFooter: some View {
         VStack(spacing: 4) {
-            Text("VibeProxy Ultra \(appVersion)")
+            Text("VibeRouter \(appVersion)")
                 .font(.caption.weight(.medium))
                 .foregroundColor(.secondary)
             Text("© 2026 Geekyshubham · MIT")

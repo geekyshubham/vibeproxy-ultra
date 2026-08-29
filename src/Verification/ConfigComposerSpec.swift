@@ -436,7 +436,7 @@ struct ConfigComposerSpec {
             )
         }
 
-        // The management console is loopback-only, so VibeProxy Ultra lets the user turn the
+        // The management console is loopback-only, so VibeRouter lets the user turn the
         // password off. These checks pin what the composer writes, because the flag it emits
         // is the only thing standing between "convenient" and "credentials served to the LAN".
 

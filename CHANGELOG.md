@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **VibeProxy Ultra** are documented in this file.
+All notable changes to **VibeRouter** are documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -12,17 +12,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Fixed
 - **Claude Code, OpenCode, and Factory no longer autoconfigure to a model that does not exist** — Autoconfigure pinned provider-scoped IDs such as `[Kiro] claude-sonnet-4-5`, `[Codex] gpt-5.5`, and `[Antigravity] claude-sonnet-4-6`. The bundled proxy has no such namespace, so every request against a pinned ID failed with `unknown provider for model`. The writers now resolve a model from the proxy's live `/v1/models` catalog and, when nothing matches, leave `ANTHROPIC_MODEL` unset so the client sends its own default. An already-pinned bracketed value is replaced rather than left in place. Quota-wake fallbacks were cleaned up the same way, and providers the proxy cannot route to (Kiro, Copilot) no longer fall through to universal fallback models, which would have reported a successful wake after pinging a different provider's quota.
 - **Kiro Add Account opens AWS Builder ID in the browser** — New Kiro accounts register an OIDC client, start device authorization, copy the user code, and open the verification URL. Existing AWS IdC/Builder ID files are refreshed through `https://oidc.<region>.amazonaws.com/token` (the social `kiro.dev` endpoint cannot revive them). IDE import overlays tokens onto the matching Builder ID file instead of writing a stripped `kiro-kiro-account.json`.
-- **Add Account no longer crashes for providers this binary does not OAuth** — The bundled proxy only implements Claude, ChatGPT/Codex, Gemini, Kimi, Antigravity, and Grok login flags. Clicking Add Account for Kiro, Copilot, Cursor, Qwen, CodeBuddy, GitLab, or Kilo spawned a missing `-*-login` flag; Go dumped stdout+stderr and the unsynchronized pipe capture could crash VibeProxy. Login flags are now an allowlist. Cursor / Copilot import a signed-in desktop session; Qwen / CodeBuddy / GitLab / Kilo open paste-JSON. ChatGPT/Codex still uses real `-codex-login`. Auth-process output is captured under a lock.
-- **ChatGPT/Codex limits and sessions no longer die on a stale imported copy** — Imported `~/.cli-proxy-api/codex-*.json` files went stale while Codex CLI/desktop kept rotating `~/.codex/auth.json` + the Keychain. Overview then failed to load limits, keep-alive posted the leftover refresh token (`refresh_token_reused`), and OpenAI revoked the whole family — forcing a manual re-login. VibeProxy now adopts the live CLI/desktop token before any usage fetch or refresh, retries once on 401, never treats a still-refreshable session as expired (OpenAI refresh-token JWTs often share the access-token `exp`), fans a rotated token out to every sibling file and back to `~/.codex`, and still fetches limits when the native session is alive.
-- **Grok usage limits stay in sync with the live CLI session** — Imported `~/.cli-proxy-api/xai-*.json` copies went stale while `grok` kept refreshing `~/.grok/auth.json`, so Overview could not show SuperGrok's weekly pool even though Grok CLI itself worked. VibeProxy now copies a fresher CLI token onto the imported file, prefers that token for billing, and refreshes through xAI's real OIDC endpoint (`https://auth.x.ai/oauth2/token` with `client_id`). The old `/oauth/token` path is Cloudflare 403 and never rotated tokens; rotated tokens are written back to `~/.grok/auth.json` so the CLI and the menu bar cannot drift apart again.
-- **Cursor usage no longer reads as exhausted** — Current `/api/usage-summary` payloads carry a `breakdown` (included/bonus/total) in which `used`/`limit` only count the *included* bucket, so a fully-spent included quota reported `2000/2000` and VibeProxy showed 100% used while 12k bonus units remained and Cursor's own UI said "42%". When a breakdown is present the `*PercentUsed` fields (which match Cursor's displayed percentage) are trusted directly; legacy payloads without one keep the old cents/inversion logic.
+- **Add Account no longer crashes for providers this binary does not OAuth** — The bundled proxy only implements Claude, ChatGPT/Codex, Gemini, Kimi, Antigravity, and Grok login flags. Clicking Add Account for Kiro, Copilot, Cursor, Qwen, CodeBuddy, GitLab, or Kilo spawned a missing `-*-login` flag; Go dumped stdout+stderr and the unsynchronized pipe capture could crash VibeRouter. Login flags are now an allowlist. Cursor / Copilot import a signed-in desktop session; Qwen / CodeBuddy / GitLab / Kilo open paste-JSON. ChatGPT/Codex still uses real `-codex-login`. Auth-process output is captured under a lock.
+- **ChatGPT/Codex limits and sessions no longer die on a stale imported copy** — Imported `~/.cli-proxy-api/codex-*.json` files went stale while Codex CLI/desktop kept rotating `~/.codex/auth.json` + the Keychain. Overview then failed to load limits, keep-alive posted the leftover refresh token (`refresh_token_reused`), and OpenAI revoked the whole family — forcing a manual re-login. VibeRouter now adopts the live CLI/desktop token before any usage fetch or refresh, retries once on 401, never treats a still-refreshable session as expired (OpenAI refresh-token JWTs often share the access-token `exp`), fans a rotated token out to every sibling file and back to `~/.codex`, and still fetches limits when the native session is alive.
+- **Grok usage limits stay in sync with the live CLI session** — Imported `~/.cli-proxy-api/xai-*.json` copies went stale while `grok` kept refreshing `~/.grok/auth.json`, so Overview could not show SuperGrok's weekly pool even though Grok CLI itself worked. VibeRouter now copies a fresher CLI token onto the imported file, prefers that token for billing, and refreshes through xAI's real OIDC endpoint (`https://auth.x.ai/oauth2/token` with `client_id`). The old `/oauth/token` path is Cloudflare 403 and never rotated tokens; rotated tokens are written back to `~/.grok/auth.json` so the CLI and the menu bar cannot drift apart again.
+- **Cursor usage no longer reads as exhausted** — Current `/api/usage-summary` payloads carry a `breakdown` (included/bonus/total) in which `used`/`limit` only count the *included* bucket, so a fully-spent included quota reported `2000/2000` and VibeRouter showed 100% used while 12k bonus units remained and Cursor's own UI said "42%". When a breakdown is present the `*PercentUsed` fields (which match Cursor's displayed percentage) are trusted directly; legacy payloads without one keep the old cents/inversion logic.
 - **Codex reset badge no longer lies when offline** — The reset-credits refactor made an unreachable ChatGPT API look identical to "no resets banked"; failures now return nothing to display instead of a false "No rate-limit resets left" chip, both on the card and when redeeming.
 
 ### Added
-- **Rate-limit reset banks, with one-tap redemption** — The Overview now shows how many banked resets an account holds and lets you apply one in place, the same way the Wake button works for 5-hour windows. **Grok** joins ChatGPT/Codex: SuperGrok's one-time usage resets (the "clear your full weekly pool" tokens from Settings → Usage, expiring Sep 12, 2026) are read live via xAI's `ConsumerUiSvc` gRPC and can be redeemed from VibeProxy — pick the account, confirm, and the weekly pool clears without opening grok.com. Codex reset credits are now redeemable too (`wham/rate-limit-reset-credits/consume`, soonest-expiring credit first), instead of being display-only. The badge, compact row summary, and "Use rate-limit reset" button render automatically for any provider whose snapshot carries a bank, so future providers need only a fetcher.
+- **Rate-limit reset banks, with one-tap redemption** — The Overview now shows how many banked resets an account holds and lets you apply one in place, the same way the Wake button works for 5-hour windows. **Grok** joins ChatGPT/Codex: SuperGrok's one-time usage resets (the "clear your full weekly pool" tokens from Settings → Usage, expiring Sep 12, 2026) are read live via xAI's `ConsumerUiSvc` gRPC and can be redeemed from VibeRouter — pick the account, confirm, and the weekly pool clears without opening grok.com. Codex reset credits are now redeemable too (`wham/rate-limit-reset-credits/consume`, soonest-expiring credit first), instead of being display-only. The badge, compact row summary, and "Use rate-limit reset" button render automatically for any provider whose snapshot carries a bank, so future providers need only a fetcher.
 - **Paste token JSON** on every provider — drop in `~/.codex/auth.json`, Claude credentials, Cursor token JSON, Copilot oauth, Gemini `oauth_creds.json`, or a CLIProxy auth file and the account is added. No browser round-trip required.
 - **Cursor subscription** — usage-summary + Stripe profile (Total / Auto + Composer / API / On-Demand) and plan labels (Free / Pro / Pro+ / Business / Enterprise). Switch injects into Cursor’s `state.vscdb`.
-- **Multi-instance** — Settings → Instances launches isolated Cursor / Codex / Claude / Antigravity / VS Code Copilot / Kiro / Gemini profiles, each bindable to a VibeProxy account (Cockpit-style `--user-data-dir` / `CODEX_HOME`).
+- **Multi-instance** — Settings → Instances launches isolated Cursor / Codex / Claude / Antigravity / VS Code Copilot / Kiro / Gemini profiles, each bindable to a VibeRouter account (Cockpit-style `--user-data-dir` / `CODEX_HOME`).
 - Import the signed-in Cursor desktop account from local `state.vscdb`.
 
 ### Fixed
@@ -34,7 +34,7 @@ Usage by date, everywhere numbers are shown.
 
 ### Added
 - **"What did I use on this day?"** — A date picker in the menu bar **Overview** and in the management console top bar, backed by one shared data layer. Pick a day to see that day's tokens, estimated API $, request count, the provider you leaned on most (as a share of spend), and the per-model breakdown.
-- **Persisted day history** — Daily totals accumulate in `~/Library/Application Support/VibeProxy/usage-daily.json` (atomic writes, 400-day retention), so history outlives a restart and survives session logs aging out of the scan window. Each scan **replaces** a day's totals per provider rather than adding to them, so refreshing never inflates today.
+- **Persisted day history** — Daily totals accumulate in `~/Library/Application Support/VibeRouter/usage-daily.json` (atomic writes, 400-day retention), so history outlives a restart and survives session logs aging out of the scan window. Each scan **replaces** a day's totals per provider rather than adding to them, so refreshing never inflates today.
 - **Honest day attribution** — Every provider the Overview counts also appears in the by-date view, so the two can't disagree about a day. Where the per-day figure is weaker, it says so instead of being dropped or dressed up as exact: Copilot reports real day totals but can't name the answering model, and Grok pins a whole session's estimate to its last-active day. OpenCode is read per-turn rather than from its cumulative session row, so a session resumed across several days no longer lands entirely on one.
 - **Optional management password** — New Settings toggle, **off by default**: the console is a loopback tool, so a login prompt on a single-user Mac adds friction without adding protection. Turning it on restores the password gate. While auth is off, the server serves the management API only to callers whose TCP peer address is genuinely loopback, and only to same-origin or loopback browser origins — so the port being reachable off-box is not by itself enough to read your keys. It is still an unauthenticated API for anything already running on your Mac; turn the password on if that matters to you.
 - Management API: `GET /v0/management/usage-daily` (a day's totals and breakdown) and `GET /v0/management/auth-mode`.
@@ -52,7 +52,7 @@ Both of these were found by an adversarial audit of this release before it shipp
 - The console's provider-name table was missing Cursor, CodeBuddy, GitLab and Kilo, and mis-cased unknown providers.
 
 ### Changed
-- The app bundle is now named **VibeProxy Ultra.app**, matching the name already shown in the menu bar and About window. Settings and usage history are unaffected — they are keyed on the bundle identifier and a fixed Application Support path, not the bundle filename. Downloadable archives keep their existing space-free names (`VibeProxy-arm64.zip`), so download URLs are unchanged.
+- The app bundle is now named **VibeRouter.app**, matching the name already shown in the menu bar and About window. Settings and usage history are unaffected — they are keyed on the bundle identifier and a fixed Application Support path, not the bundle filename. Downloadable archives keep their existing space-free names (`VibeRouter-arm64.zip`), so download URLs are unchanged.
 - Kiro plan credits are kept out of token totals throughout (they are stored as millicredits, so summing them would inflate a token count ~1000× per credit). Providers are ranked by **cost**, the only basis comparable across unlike units.
 - Version **1.3.1**.
 
@@ -140,7 +140,7 @@ Full menu bar + Settings UI/UX revamp with Apple **Liquid Glass** styling on mac
 - **Menu bar port label** — Proxy port no longer shows a locale thousands separator (e.g. `8,337` → `8337`).
 
 ### Changed
-- Removed remaining third-party fork/attribution branding; product is VibeProxy Ultra only.
+- Removed remaining third-party fork/attribution branding; product is VibeRouter only.
 
 ## [1.1.0] - 2026-07-09
 
@@ -160,7 +160,7 @@ Analytics accuracy, Kiro quota ground truth, focus-steal fix, and branding clean
 - Expanded token pricing catalog (cache write rates, richer model matching).
 
 ### Changed
-- Branding is **VibeProxy Ultra** only (About, settings footer, docs, copyright).
+- Branding is **VibeRouter** only (About, settings footer, docs, copyright).
 - Version **1.1.0**.
 
 ## [1.0.1] - 2026-07-09
@@ -169,7 +169,7 @@ Accurate quotas, status, and menu UX.
 
 ## [1.0.0] - 2026-07-09
 
-Initial VibeProxy Ultra release — usage limits, account import, session reliability, multi-arch packaging.
+Initial VibeRouter release — usage limits, account import, session reliability, multi-arch packaging.
 
 ### Added
 - Live per-account usage cards with streaming updates

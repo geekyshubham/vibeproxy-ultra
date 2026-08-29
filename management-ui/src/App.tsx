@@ -1,7 +1,7 @@
 /* ============================================================================
    App — the auth gate switch. While the boot probe runs we show a minimal
    splash; unauthenticated → <LoginGate/>; else the routed console.
-   The favicon (branded VibeProxy glyph on the accent chip) is a static
+   The favicon (branded VibeRouter glyph on the accent chip) is a static
    <link> in index.html so it renders before React mounts.
    ========================================================================== */
 import { RouterProvider } from 'react-router-dom';
