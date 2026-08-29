@@ -23,7 +23,8 @@ app: ## Create the .app bundle
 
 install: app ## Build and install to /Applications
 	@echo "📲 Installing to /Applications..."
-	@rm -rf "/Applications/VibeRouter.app" "/Applications/VibeRouter.app"
+	@rm -rf "/Applications/VibeRouter.app"
+	@rm -rf "/Applications/VibeProxy Ultra.app" "/Applications/VibeProxy.app"
 	@cp -R "VibeRouter.app" /Applications/
 	@xattr -cr "/Applications/VibeRouter.app" || true
 	@echo "✅ Installed to /Applications/VibeRouter.app"

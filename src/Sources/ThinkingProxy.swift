@@ -295,7 +295,100 @@ class ThinkingProxy {
             return
         }
         
+        // Kiro has no executor in the bundled proxy, so it is served here instead
+        // of being forwarded to a backend that would answer "unknown provider".
+        if method == "POST", rewrittenPath.hasSuffix("/v1/messages"),
+           let translated = KiroDirectProvider.translateRequest(anthropicBody: modifiedBody)
+        {
+            NSLog("[ThinkingProxy] Serving %@ from Kiro directly", translated.model)
+            serveKiro(translated, connection: connection)
+            return
+        }
+
+        // The catalog is merged here so Kiro models are visible to clients even
+        // though the backend cannot route them.
+        if method == "GET", rewrittenPath.hasSuffix("/v1/models") {
+            serveMergedModelCatalog(connection: connection)
+            return
+        }
+
         forwardRequest(method: method, path: rewrittenPath, version: httpVersion, headers: headers, body: modifiedBody, thinkingEnabled: thinkingEnabled, originalConnection: connection)
+    }
+
+    // MARK: - Kiro direct route
+
+    private func serveKiro(_ translated: KiroDirectProvider.TranslatedRequest, connection: NWConnection) {
+        Task {
+            switch await KiroDirectProvider.send(conversationState: translated.conversationState) {
+            case .failure(let status, let message):
+                NSLog("[ThinkingProxy] Kiro request failed (%d): %@", status, message)
+                let payload: [String: Any] = [
+                    "type": "error",
+                    "error": ["type": "api_error", "message": message],
+                ]
+                self.sendJSON(payload, status: status, to: connection)
+            case .success(let reply):
+                NSLog("[ThinkingProxy] Kiro replied (%.4f credits, %d tool calls)", reply.credits, reply.toolCalls.count)
+                if translated.stream {
+                    let body = KiroDirectProvider.anthropicSSE(
+                        reply: reply,
+                        model: translated.model,
+                        inputTokens: translated.estimatedInputTokens
+                    )
+                    self.sendSSE(body, to: connection)
+                } else {
+                    let payload = KiroDirectProvider.anthropicMessageJSON(
+                        reply: reply,
+                        model: translated.model,
+                        inputTokens: translated.estimatedInputTokens
+                    )
+                    self.sendJSON(payload, status: 200, to: connection)
+                }
+            }
+        }
+    }
+
+    private func serveMergedModelCatalog(connection: NWConnection) {
+        Task {
+            var models: [[String: Any]] = []
+            if let url = URL(string: "http://\(self.targetHost):\(self.targetPort)/v1/models") {
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 15
+                request.setValue("Bearer viberouter", forHTTPHeaderField: "Authorization")
+                if let (data, _) = try? await URLSession.shared.data(for: request),
+                   let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let list = root["data"] as? [[String: Any]]
+                {
+                    models = list
+                }
+            }
+            let existing = Set(models.compactMap { $0["id"] as? String })
+            for id in KiroDirectProvider.advertisedModelIDs where !existing.contains(id) {
+                models.append(["id": id, "object": "model", "owned_by": "kiro"])
+            }
+            self.sendJSON(["object": "list", "data": models], status: 200, to: connection)
+        }
+    }
+
+    private func sendJSON(_ object: [String: Any], status: Int, to connection: NWConnection) {
+        let body = (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
+        var response = Data("HTTP/1.1 \(status) \(status == 200 ? "OK" : "Error")\r\n".utf8)
+        response.append(Data("Content-Type: application/json\r\n".utf8))
+        response.append(Data("Content-Length: \(body.count)\r\n".utf8))
+        response.append(Data("Connection: close\r\n\r\n".utf8))
+        response.append(body)
+        connection.send(content: response, completion: .contentProcessed({ _ in connection.cancel() }))
+    }
+
+    private func sendSSE(_ body: String, to connection: NWConnection) {
+        let bodyData = Data(body.utf8)
+        var response = Data("HTTP/1.1 200 OK\r\n".utf8)
+        response.append(Data("Content-Type: text/event-stream\r\n".utf8))
+        response.append(Data("Cache-Control: no-cache\r\n".utf8))
+        response.append(Data("Content-Length: \(bodyData.count)\r\n".utf8))
+        response.append(Data("Connection: close\r\n\r\n".utf8))
+        response.append(bodyData)
+        connection.send(content: response, completion: .contentProcessed({ _ in connection.cancel() }))
     }
     
     private func isClaudeModelRequest(body: String) -> Bool {
