@@ -1803,6 +1803,7 @@ enum NativeUsageFetcher {
                 return .empty(authAccountID: authAccountID, providerID: providerID, accountEmail: label, error: "No response from OpenCode Zen")
             }
             if http.statusCode == 401 {
+                NSLog("[OpenCodeGo] %@ → 401 rejected", label)
                 return .empty(
                     authAccountID: authAccountID,
                     providerID: providerID,
@@ -1831,6 +1832,12 @@ enum NativeUsageFetcher {
             }
 
             let windows = openCodeGoWindows(from: usage)
+            NSLog(
+                "[OpenCodeGo] %@ → %d windows (%@)",
+                label,
+                windows.count,
+                windows.map { "\($0.label ?? "?") \(Int($0.usedPercent))%" }.joined(separator: ", ")
+            )
             guard !windows.isEmpty else {
                 return .empty(
                     authAccountID: authAccountID,

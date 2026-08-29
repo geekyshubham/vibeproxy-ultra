@@ -483,7 +483,7 @@ class AuthManager: ObservableObject {
     /// Access-token timestamps alone do not count if a refresh token is present.
     static func sessionExpiryDate(from json: [String: Any], serviceType: ServiceType) -> Date? {
         // API-key providers never expire from access-token clocks.
-        if serviceType == .zai {
+        if serviceType == .zai || serviceType == .opencodeGo {
             return nil
         }
 
