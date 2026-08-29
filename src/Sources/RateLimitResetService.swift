@@ -239,8 +239,7 @@ enum RateLimitResetService {
         }
     }
 
-    /// Token order mirrors fetchGrokUsage: refreshed auth-file token, matching
-    /// ~/.grok CLI token, original auth-file token last.
+    /// Token order mirrors fetchGrokUsage: live ~/.grok CLI token first, then the auth file.
     private static func grokTokenCandidates(for account: AuthAccount) async -> [String] {
         var candidates: [String] = []
         func append(_ token: String?) {
@@ -248,24 +247,14 @@ enum RateLimitResetService {
             candidates.append(token)
         }
 
-        if let refreshed = NativeUsageFetcher.readAuthPayload(at: account.filePath) {
-            append(stringValue(refreshed, keys: ["access_token", "key"]))
-        }
-
         let local = NativeUsageFetcher.readGrokAppPayload()
-        if let local,
-           let localToken = stringValue(local, keys: ["access_token", "key"]),
-           !NativeUsageFetcher.isGrokCredentialExpired(local)
-        {
-            let accountEmail = account.email?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let localEmail = stringValue(local, keys: ["email"])
-            let identityMatches: Bool = {
-                guard let accountEmail, !accountEmail.isEmpty, let localEmail else { return true }
-                return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
-            }()
-            if identityMatches {
-                append(localToken)
-            }
+        let filePayload = NativeUsageFetcher.readAuthPayload(at: account.filePath) ?? [:]
+        let ordered = NativeUsageFetcher.grokBillingTokenCandidates(
+            accountPayload: filePayload,
+            localGrok: local
+        )
+        for candidate in ordered {
+            append(candidate.token)
         }
 
         return candidates

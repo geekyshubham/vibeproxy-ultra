@@ -391,7 +391,7 @@ enum TokenRefreshService {
     }
 
     /// Keep native CLI/desktop copies in lockstep after a rotating refresh.
-    /// Stale ~/.claude, ~/.gemini, or Cursor state.vscdb copies reuse the old token and kill the family.
+    /// Stale ~/.claude, ~/.gemini, ~/.grok, or Cursor state.vscdb copies reuse the old token and kill the family.
     static func syncNativeCredentialStores(type: String, oldRefresh: String, updated: [String: Any]) {
         let trimmed = oldRefresh.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -404,6 +404,8 @@ enum TokenRefreshService {
             syncGeminiCredentials(oldRefresh: trimmed, updated: updated)
         case "cursor":
             syncCursorState(oldRefresh: trimmed, updated: updated)
+        case "xai", "grok":
+            syncGrokCLICredentials(oldRefresh: trimmed, updated: updated)
         default:
             break
         }
@@ -593,23 +595,59 @@ enum TokenRefreshService {
         return applyOAuthTokenResponse(json, to: payload, preferRefreshFromResponse: false)
     }
 
+    /// Public Grok CLI OIDC client (same id Grok Build stores under `oidc_client_id`).
+    static let xAIGrokClientID = "b1a00492-073a-47ea-816f-4c329264a828"
+    /// OIDC discovery (`/.well-known/openid-configuration`) lists `/oauth2/token`.
+    /// The legacy `/oauth/token` path is Cloudflare 403 and must not be first.
+    static let xAITokenEndpoints = [
+        "https://auth.x.ai/oauth2/token",
+        "https://auth.x.ai/oauth/token",
+    ]
+
+    static func xAIClientID(from payload: [String: Any]) -> String {
+        if let id = stringValue(payload, keys: ["oidc_client_id", "client_id"]), !id.isEmpty {
+            return id
+        }
+        if let token = stringValue(payload, keys: ["access_token", "key"]) {
+            if let id = jwtClaimString(token, key: "client_id"), !id.isEmpty { return id }
+            if let id = jwtClaimString(token, key: "aud"), !id.isEmpty { return id }
+        }
+        return xAIGrokClientID
+    }
+
     private static func refreshXAI(_ payload: [String: Any]) async -> [String: Any]? {
         guard let refresh = refreshToken(from: payload) else { return nil }
-        // Best-effort: xAI OAuth refresh endpoints vary by client; try common form.
-        let endpoints = [
-            "https://auth.x.ai/oauth/token",
-            "https://api.x.ai/oauth/token",
-        ]
+        let clientID = xAIClientID(from: payload)
         let body = formBody([
             "grant_type": "refresh_token",
             "refresh_token": refresh,
+            "client_id": clientID,
         ])
-        for endpoint in endpoints {
+        for endpoint in xAITokenEndpoints {
             if let json = await postForm(url: endpoint, body: body) {
-                return applyOAuthTokenResponse(json, to: payload, preferRefreshFromResponse: true)
+                guard var updated = applyOAuthTokenResponse(
+                    json,
+                    to: payload,
+                    preferRefreshFromResponse: true
+                ) else { continue }
+                updated["oidc_client_id"] = clientID
+                updated["client_id"] = clientID
+                return updated
             }
         }
         return nil
+    }
+
+    private static func syncGrokCLICredentials(oldRefresh: String, updated: [String: Any]) {
+        guard let access = stringValue(updated, keys: ["access_token", "key"]) else { return }
+        if NativeUsageFetcher.updateGrokAppPayload(
+            oldRefresh: oldRefresh,
+            accessToken: access,
+            refreshToken: stringValue(updated, keys: ["refresh_token"]),
+            expiresAt: stringValue(updated, keys: ["expired", "expires_at", "expiresAt"])
+        ) {
+            NSLog("[TokenRefresh] Synced rotated refresh token to ~/.grok/auth.json")
+        }
     }
 
     private static func refreshKiro(_ payload: [String: Any]) async -> [String: Any]? {
@@ -834,6 +872,25 @@ enum TokenRefreshService {
     }
 
     private static func jwtClaimDate(_ token: String, key: String) -> Date? {
+        guard let json = jwtPayload(token) else { return nil }
+        if let value = json[key] as? TimeInterval {
+            return Date(timeIntervalSince1970: value)
+        }
+        if let value = json[key] as? Int {
+            return Date(timeIntervalSince1970: TimeInterval(value))
+        }
+        return nil
+    }
+
+    private static func jwtClaimString(_ token: String, key: String) -> String? {
+        guard let json = jwtPayload(token),
+              let value = json[key] as? String
+        else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func jwtPayload(_ token: String) -> [String: Any]? {
         let parts = token.split(separator: ".")
         guard parts.count >= 2 else { return nil }
         var payload = String(parts[1])
@@ -843,16 +900,8 @@ enum TokenRefreshService {
         if remainder > 0 {
             payload += String(repeating: "=", count: 4 - remainder)
         }
-        guard let data = Data(base64Encoded: payload),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        if let value = json[key] as? TimeInterval {
-            return Date(timeIntervalSince1970: value)
-        }
-        if let value = json[key] as? Int {
-            return Date(timeIntervalSince1970: TimeInterval(value))
-        }
-        return nil
+        guard let data = Data(base64Encoded: payload) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
     private static func isoString(_ date: Date) -> String {

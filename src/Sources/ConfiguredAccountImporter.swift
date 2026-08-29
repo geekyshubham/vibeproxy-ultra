@@ -354,7 +354,7 @@ enum ConfiguredAccountImporter {
         let expiresAt = grokExpiresAt(from: entry)
         let now = Date()
 
-        let record: [String: Any] = [
+        var record: [String: Any] = [
             "type": "xai",
             "email": email,
             "access_token": accessToken,
@@ -365,6 +365,12 @@ enum ConfiguredAccountImporter {
             "last_refresh": ISO8601DateFormatter().string(from: now),
             "auth_kind": "oauth",
         ]
+        if let clientID = (entry["oidc_client_id"] as? String) ?? (entry["client_id"] as? String),
+           !clientID.isEmpty
+        {
+            record["oidc_client_id"] = clientID
+            record["client_id"] = clientID
+        }
 
         return writeAuthRecord(
             record,

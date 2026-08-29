@@ -19,17 +19,18 @@ release: ## Build the Swift executable (release)
 app: ## Create the .app bundle
 	@echo "📦 Creating .app bundle..."
 	@./create-app-bundle.sh
-	@echo "✅ App bundle created: VibeProxy.app"
+	@echo "✅ App bundle created: VibeProxy Ultra.app"
 
 install: app ## Build and install to /Applications
 	@echo "📲 Installing to /Applications..."
-	@rm -rf "/Applications/VibeProxy.app"
-	@cp -r "VibeProxy.app" /Applications/
-	@echo "✅ Installed to /Applications/VibeProxy.app"
+	@rm -rf "/Applications/VibeProxy Ultra.app" "/Applications/VibeProxy.app"
+	@cp -R "VibeProxy Ultra.app" /Applications/
+	@xattr -cr "/Applications/VibeProxy Ultra.app" || true
+	@echo "✅ Installed to /Applications/VibeProxy Ultra.app"
 
 run: app ## Build and run the app
 	@echo "🚀 Launching app..."
-	@open "VibeProxy.app"
+	@open "VibeProxy Ultra.app"
 
 clean: ## Clean build artifacts
 	@echo "🧹 Cleaning..."

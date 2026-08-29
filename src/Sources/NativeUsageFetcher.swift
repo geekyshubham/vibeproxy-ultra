@@ -1812,64 +1812,58 @@ enum NativeUsageFetcher {
 
     // MARK: - Grok
 
+    struct GrokTokenCandidate: Equatable {
+        let token: String
+        let source: String
+        let expired: Bool
+    }
+
     private static func fetchGrokUsage(
         authAccountID: String,
         providerID: String,
         payload: [String: Any]
     ) async -> ProviderUsageSnapshot {
+        var workingPayload = payload
+        if let fileURL = resolveAuthFileURL(authAccountID: authAccountID, providerID: providerID),
+           overlayGrokCLICredentialsIfFresher(onto: fileURL),
+           let latest = readAuthPayload(at: fileURL)
+        {
+            workingPayload = enrichPayload(latest, for: .grok)
+        }
+
         // Keep this account's own email so multi-account lists do not all show ~/.grok identity.
-        let accountEmail = stringValue(payload, keys: ["email"])
+        let accountEmail = stringValue(workingPayload, keys: ["email"])
         let localGrok = readGrokAppPayload()
         let localEmail = stringValue(localGrok ?? [:], keys: ["email"])
-
-        // Token order (per account — never stamp SuperGrok onto every row blindly):
-        // 1) fresh ~/.grok token when email matches (SuperGrok billing actually works here)
-        // 2) this auth file's token if not expired
-        // 3) expired tokens last (may still work briefly; then we try refresh)
-        var tokenCandidates: [(token: String, source: String, expired: Bool)] = []
-        func appendCandidate(_ token: String, source: String, expired: Bool) {
-            guard !token.isEmpty, !tokenCandidates.contains(where: { $0.token == token }) else { return }
-            if expired {
-                tokenCandidates.append((token, source, true))
-            } else {
-                // Fresh tokens first.
-                if let idx = tokenCandidates.firstIndex(where: { $0.expired }) {
-                    tokenCandidates.insert((token, source, false), at: idx)
-                } else {
-                    tokenCandidates.append((token, source, false))
-                }
-            }
-        }
-
-        if let localGrok,
-           let t = stringValue(localGrok, keys: ["access_token", "key"])
-        {
-            let emailsMatch: Bool = {
-                guard let accountEmail, let localEmail else {
-                    return accountEmail == nil
-                }
-                return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
-            }()
-            if emailsMatch {
-                appendCandidate(t, source: "grok-cli", expired: isGrokCredentialExpired(localGrok))
-            }
-        }
-        if let t = stringValue(payload, keys: ["access_token", "key"]) {
-            appendCandidate(t, source: "auth-file", expired: isGrokCredentialExpired(payload))
-        }
+        var tokenCandidates = grokBillingTokenCandidates(
+            accountPayload: workingPayload,
+            localGrok: localGrok
+        )
 
         let displayEmail = accountEmail ?? localEmail
 
         // Proactively refresh stale auth-file tokens once (cli-proxy xAI files go stale fast).
-        var workingPayload = payload
-        if isGrokCredentialExpired(payload) || tokenCandidates.allSatisfy(\.expired) {
+        if isGrokCredentialExpired(workingPayload) || tokenCandidates.allSatisfy(\.expired) {
             if let fileURL = resolveAuthFileURL(authAccountID: authAccountID, providerID: providerID),
                await TokenRefreshService.refreshAccountFile(fileURL),
                let refreshed = readAuthPayload(at: fileURL)
             {
                 workingPayload = enrichPayload(refreshed, for: .grok)
                 if let t = stringValue(workingPayload, keys: ["access_token", "key"]) {
-                    appendCandidate(t, source: "refreshed", expired: isGrokCredentialExpired(workingPayload))
+                    let candidate = GrokTokenCandidate(
+                        token: t,
+                        source: "refreshed",
+                        expired: isGrokCredentialExpired(workingPayload)
+                    )
+                    if !tokenCandidates.contains(where: { $0.token == t }) {
+                        if candidate.expired {
+                            tokenCandidates.append(candidate)
+                        } else if let idx = tokenCandidates.firstIndex(where: { $0.expired }) {
+                            tokenCandidates.insert(candidate, at: idx)
+                        } else {
+                            tokenCandidates.append(candidate)
+                        }
+                    }
                 }
             }
         }
@@ -2140,14 +2134,200 @@ enum NativeUsageFetcher {
         return nil
     }
 
-    /// True when `expired` / `expires_at` is in the past (or unparseable as expired).
+    /// True when JWT `exp` or `expired` / `expires_at` is in the past.
     static func isGrokCredentialExpired(_ payload: [String: Any], now: Date = Date()) -> Bool {
-        if let raw = stringValue(payload, keys: ["expired", "expires_at", "expiresAt"]) {
-            if let date = parseISO8601(raw) {
-                return date <= now
-            }
+        if let token = stringValue(payload, keys: ["access_token", "key"]),
+           let exp = jwtExpiry(token)
+        {
+            return exp <= now
+        }
+        if let raw = stringValue(payload, keys: ["expired", "expires_at", "expiresAt"]),
+           let date = parseISO8601(raw)
+        {
+            return date <= now
         }
         return false
+    }
+
+    /// Token order (per account — never stamp SuperGrok onto every row blindly):
+    /// 1) fresh ~/.grok token when identity matches
+    /// 2) this auth file's token if not expired
+    /// 3) expired tokens last
+    static func grokBillingTokenCandidates(
+        accountPayload: [String: Any],
+        localGrok: [String: Any]?,
+        now: Date = Date()
+    ) -> [GrokTokenCandidate] {
+        var tokenCandidates: [GrokTokenCandidate] = []
+        func appendCandidate(_ token: String, source: String, expired: Bool) {
+            guard !token.isEmpty, !tokenCandidates.contains(where: { $0.token == token }) else { return }
+            let candidate = GrokTokenCandidate(token: token, source: source, expired: expired)
+            if expired {
+                tokenCandidates.append(candidate)
+            } else if let idx = tokenCandidates.firstIndex(where: { $0.expired }) {
+                tokenCandidates.insert(candidate, at: idx)
+            } else {
+                tokenCandidates.append(candidate)
+            }
+        }
+
+        let accountEmail = stringValue(accountPayload, keys: ["email"])
+        let localEmail = stringValue(localGrok ?? [:], keys: ["email"])
+        if let localGrok, let token = stringValue(localGrok, keys: ["access_token", "key"]) {
+            let emailsMatch: Bool = {
+                guard let accountEmail, let localEmail else { return accountEmail == nil }
+                return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
+            }()
+            // Live CLI session with no email still beats a dead imported copy.
+            let localLive = !isGrokCredentialExpired(localGrok, now: now)
+            if emailsMatch || (localEmail == nil && localLive) {
+                appendCandidate(token, source: "grok-cli", expired: !localLive)
+            }
+        }
+        if let token = stringValue(accountPayload, keys: ["access_token", "key"]) {
+            appendCandidate(token, source: "auth-file", expired: isGrokCredentialExpired(accountPayload, now: now))
+        }
+        return tokenCandidates
+    }
+
+    /// Copy a fresher `~/.grok` access/refresh token onto the cli-proxy xAI file.
+    /// One-shot import otherwise goes stale while Grok CLI keeps its own session alive.
+    @discardableResult
+    static func overlayGrokCLICredentialsIfFresher(
+        onto authFile: URL,
+        localGrok: [String: Any]? = nil,
+        now: Date = Date()
+    ) -> Bool {
+        guard var payload = readAuthPayload(at: authFile) else { return false }
+        let local = localGrok ?? readGrokAppPayload()
+        guard let local,
+              let localToken = stringValue(local, keys: ["access_token", "key"]),
+              !localToken.isEmpty,
+              !isGrokCredentialExpired(local, now: now)
+        else { return false }
+
+        let accountEmail = stringValue(payload, keys: ["email"])
+        let localEmail = stringValue(local, keys: ["email"])
+        if let accountEmail, let localEmail,
+           accountEmail.caseInsensitiveCompare(localEmail) != .orderedSame
+        {
+            return false
+        }
+
+        let fileToken = stringValue(payload, keys: ["access_token", "key"])
+        let sameAccess = fileToken == localToken
+        let sameRefresh = stringValue(payload, keys: ["refresh_token"])
+            == stringValue(local, keys: ["refresh_token"])
+        if sameAccess && sameRefresh { return false }
+
+        if let fileToken, !isGrokCredentialExpired(payload, now: now) {
+            let localExp = jwtExpiry(localToken) ?? .distantPast
+            let fileExp = jwtExpiry(fileToken) ?? .distantPast
+            if fileExp >= localExp { return false }
+        }
+
+        payload["access_token"] = localToken
+        payload["key"] = localToken
+        if let refresh = stringValue(local, keys: ["refresh_token"]) {
+            payload["refresh_token"] = refresh
+        }
+        if let exp = stringValue(local, keys: ["expired", "expires_at"]) {
+            payload["expired"] = exp
+            payload["expires_at"] = exp
+        }
+        if let clientID = stringValue(local, keys: ["oidc_client_id", "client_id"]) {
+            payload["oidc_client_id"] = clientID
+            payload["client_id"] = clientID
+        }
+        return writeAuthPayload(payload, to: authFile)
+    }
+
+    static func grokPreferredEntry(in root: [String: Any]) -> (String, [String: Any])? {
+        let oidcPrefix = "https://auth.x.ai::"
+        if let match = root.first(where: { $0.key.hasPrefix(oidcPrefix) }),
+           let entry = match.value as? [String: Any]
+        {
+            return (match.key, entry)
+        }
+        if let legacy = root["https://accounts.x.ai/sign-in"] as? [String: Any] {
+            return ("https://accounts.x.ai/sign-in", legacy)
+        }
+        return root.compactMap { key, value -> (String, [String: Any])? in
+            guard let dict = value as? [String: Any], dict["key"] != nil else { return nil }
+            return (key, dict)
+        }.first
+    }
+
+    @discardableResult
+    static func updateGrokAppPayload(
+        at url: URL? = nil,
+        oldRefresh: String,
+        accessToken: String,
+        refreshToken: String?,
+        expiresAt: String?
+    ) -> Bool {
+        let authURL = url ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".grok/auth.json")
+        guard var root = readAuthPayload(at: authURL),
+              let (entryKey, entry) = grokPreferredEntry(in: root)
+        else { return false }
+        let stored = (entry["refresh_token"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard stored == oldRefresh else { return false }
+
+        var updated = entry
+        updated["key"] = accessToken
+        if let refreshToken, !refreshToken.isEmpty {
+            updated["refresh_token"] = refreshToken
+        }
+        if let expiresAt, !expiresAt.isEmpty {
+            updated["expires_at"] = expiresAt
+        }
+        root[entryKey] = updated
+        return writeAuthPayload(root, to: authURL)
+    }
+
+    static func writeAuthPayload(_ payload: [String: Any], to url: URL) -> Bool {
+        do {
+            let data = try JSONSerialization.data(
+                withJSONObject: payload,
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            try data.write(to: url, options: [.atomic])
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static func jwtExpiry(_ token: String) -> Date? {
+        jwtClaimDate(token, key: "exp")
+    }
+
+    private static func jwtClaimDate(_ token: String, key: String) -> Date? {
+        let parts = token.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = payload.count % 4
+        if remainder > 0 {
+            payload += String(repeating: "=", count: 4 - remainder)
+        }
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        if let value = json[key] as? TimeInterval {
+            return Date(timeIntervalSince1970: value)
+        }
+        if let value = json[key] as? Int {
+            return Date(timeIntervalSince1970: TimeInterval(value))
+        }
+        return nil
     }
 
     // MARK: - Helpers
@@ -2223,27 +2403,16 @@ enum NativeUsageFetcher {
     static func readGrokAppPayload() -> [String: Any]? {
         let authURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".grok/auth.json")
-        guard let root = readAuthPayload(at: authURL) else { return nil }
+        return readGrokAppPayload(at: authURL)
+    }
 
-        let entry: [String: Any]?
-        let oidcPrefix = "https://auth.x.ai::"
-        if let match = root.first(where: { $0.key.hasPrefix(oidcPrefix) }),
-           let value = match.value as? [String: Any]
-        {
-            entry = value
-        } else if let legacy = root["https://accounts.x.ai/sign-in"] as? [String: Any] {
-            entry = legacy
-        } else {
-            entry = root.compactMap { _, value -> [String: Any]? in
-                guard let dict = value as? [String: Any], dict["key"] != nil else { return nil }
-                return dict
-            }.first
-        }
-
-        guard let entry,
-              let accessToken = entry["key"] as? String,
-              !accessToken.isEmpty
+    static func readGrokAppPayload(at authURL: URL) -> [String: Any]? {
+        guard let root = readAuthPayload(at: authURL),
+              let (_, entry) = grokPreferredEntry(in: root)
         else { return nil }
+
+        let accessToken = (entry["key"] as? String) ?? (entry["access_token"] as? String)
+        guard let accessToken, !accessToken.isEmpty else { return nil }
 
         var payload: [String: Any] = [
             "access_token": accessToken,
@@ -2255,8 +2424,17 @@ enum NativeUsageFetcher {
         if let refreshToken = entry["refresh_token"] as? String, !refreshToken.isEmpty {
             payload["refresh_token"] = refreshToken
         }
-        if let expiresAt = entry["expires_at"] as? String, !expiresAt.isEmpty {
+        if let expiresAt = (entry["expires_at"] as? String) ?? (entry["expired"] as? String),
+           !expiresAt.isEmpty
+        {
             payload["expired"] = expiresAt
+            payload["expires_at"] = expiresAt
+        }
+        if let clientID = (entry["oidc_client_id"] as? String) ?? (entry["client_id"] as? String),
+           !clientID.isEmpty
+        {
+            payload["oidc_client_id"] = clientID
+            payload["client_id"] = clientID
         }
         return payload
     }
@@ -2543,7 +2721,7 @@ extension NativeUsageFetcher {
 
     // MARK: - Grok billing protobuf helpers
 
-    private struct GrokBillingParseResult {
+    struct GrokBillingParseResult {
         let usedPercent: Double
         let resetsAt: Date?
         /// Absolute remaining credits when the billing payload exposes them.
@@ -2597,7 +2775,7 @@ extension NativeUsageFetcher {
         return message
     }
 
-    private static func parseGrokBillingResponse(_ data: Data, now: Date = Date()) -> GrokBillingParseResult? {
+    static func parseGrokBillingResponse(_ data: Data, now: Date = Date()) -> GrokBillingParseResult? {
         var payloads = grokGRPCWebDataFrames(from: data)
         if payloads.isEmpty, grokLooksLikeProtobufPayload(data) {
             payloads = [data]
@@ -2690,7 +2868,7 @@ extension NativeUsageFetcher {
                 | Int(bytes[index + 4])
             let start = index + 5
             let end = start + length
-            guard length >= 0, end <= bytes.count else { return [] }
+            guard length >= 0, end <= bytes.count else { break }
             if flags & 0x80 == 0 {
                 frames.append(Data(bytes[start..<end]))
             }

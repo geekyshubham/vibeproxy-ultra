@@ -86,6 +86,11 @@ final class TokenRefreshServiceTests: XCTestCase {
         XCTAssertEqual(other["access_token"] as? String, "old-at")
     }
 
+    func testXAIRefreshTargetsOIDCTokenEndpoint() {
+        XCTAssertEqual(TokenRefreshService.xAITokenEndpoints.first, "https://auth.x.ai/oauth2/token")
+        XCTAssertTrue(TokenRefreshService.xAITokenEndpoints.contains("https://auth.x.ai/oauth/token"))
+    }
+
     func testOpenAIRefreshFieldsIncludeOfflineAccessScope() {
         let fields = TokenRefreshService.openAIRefreshFields(refreshToken: "rt.1.x")
         XCTAssertEqual(fields["grant_type"], "refresh_token")
