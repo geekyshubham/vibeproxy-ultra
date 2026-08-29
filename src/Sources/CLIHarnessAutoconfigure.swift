@@ -116,7 +116,7 @@ enum CLIHarnessAutoconfigure {
         let baseV1 = "\(base)/v1"
         switch kind {
         case .claudeCode:
-            try configureClaudeCode(baseURL: base, apiKey: dummyAPIKey)
+            try configureClaudeCode(baseURL: base, apiKey: dummyAPIKey, proxyPort: proxyPort)
             return "Claude Code → \(base)"
         case .codex:
             try configureCodex(baseURL: baseV1, apiKey: dummyAPIKey)
@@ -128,7 +128,7 @@ enum CLIHarnessAutoconfigure {
             try configureGemini(baseURL: baseV1, apiKey: dummyAPIKey)
             return "Gemini CLI → \(baseV1)"
         case .factory:
-            try configureFactory(baseURL: base, apiKey: dummyAPIKey)
+            try configureFactory(baseURL: base, apiKey: dummyAPIKey, proxyPort: proxyPort)
             return "Factory → \(base)"
         case .kiroCLI, .amp:
             throw AutoconfigureError.notSupported(kind.displayName)
@@ -151,7 +151,7 @@ enum CLIHarnessAutoconfigure {
 
     // MARK: - Per-tool writers
 
-    private static func configureClaudeCode(baseURL: String, apiKey: String) throws {
+    private static func configureClaudeCode(baseURL: String, apiKey: String, proxyPort: Int) throws {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/settings.json")
         try FileManager.default.createDirectory(
@@ -164,9 +164,16 @@ enum CLIHarnessAutoconfigure {
         env["ANTHROPIC_BASE_URL"] = baseURL
         env["ANTHROPIC_API_KEY"] = apiKey
         env["ANTHROPIC_AUTH_TOKEN"] = apiKey
-        // Prefer Kiro Claude when present; leave specific model optional.
-        if env["ANTHROPIC_MODEL"] == nil {
-            env["ANTHROPIC_MODEL"] = "[Kiro] claude-sonnet-4-5"
+        // Only pin a model the proxy actually advertises. A stale provider-scoped
+        // ID such as "[Kiro] claude-sonnet-4-5" fails every request with
+        // "unknown provider for model", so drop it rather than leave it pinned.
+        let pinned = env["ANTHROPIC_MODEL"] as? String
+        if pinned == nil || pinned?.contains("[") == true {
+            if let resolved = resolveLiveModel(anthropicModelPreferences, port: proxyPort) {
+                env["ANTHROPIC_MODEL"] = resolved
+            } else {
+                env.removeValue(forKey: "ANTHROPIC_MODEL")
+            }
         }
         root["env"] = env
         try writeJSON(root, to: url)
@@ -240,21 +247,15 @@ enum CLIHarnessAutoconfigure {
         let modelIDs = fetchProxyModelIDs(port: proxyPort)
         var models: [String: Any] = [:]
         for id in modelIDs.prefix(40) {
-            // OpenCode model keys cannot contain spaces/brackets easily — sanitize.
-            let key = id
-                .replacingOccurrences(of: "[", with: "")
-                .replacingOccurrences(of: "]", with: "")
-                .replacingOccurrences(of: " ", with: "-")
-            models[key] = [
+            models[openCodeModelKey(id)] = [
                 "name": id,
                 "tool_call": true,
             ] as [String: Any]
         }
         if models.isEmpty {
-            models = [
-                "Kiro-claude-sonnet-4-5": ["name": "[Kiro] claude-sonnet-4-5", "tool_call": true],
-                "Codex-gpt-5.5": ["name": "[Codex] gpt-5.5", "tool_call": true],
-            ]
+            for id in anthropicModelPreferences.prefix(1) + openAIModelPreferences.prefix(1) {
+                models[openCodeModelKey(id)] = ["name": id, "tool_call": true] as [String: Any]
+            }
         }
 
         provider["vibeproxy"] = [
@@ -268,7 +269,11 @@ enum CLIHarnessAutoconfigure {
         ] as [String: Any]
         root["provider"] = provider
         if root["model"] == nil {
-            root["model"] = "vibeproxy/Kiro-claude-sonnet-4-5"
+            let preferred = resolveLiveModel(anthropicModelPreferences, port: proxyPort, available: modelIDs)
+                ?? models.keys.sorted().first
+            if let preferred {
+                root["model"] = "vibeproxy/\(openCodeModelKey(preferred))"
+            }
         }
         try writeJSON(root, to: url)
     }
@@ -290,7 +295,7 @@ enum CLIHarnessAutoconfigure {
         try writeJSON(root, to: url)
     }
 
-    private static func configureFactory(baseURL: String, apiKey: String) throws {
+    private static func configureFactory(baseURL: String, apiKey: String, proxyPort: Int) throws {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".factory/config.json")
         try FileManager.default.createDirectory(
@@ -299,29 +304,26 @@ enum CLIHarnessAutoconfigure {
         )
         try backupIfNeeded(url)
         var root = try readJSONForMerge(url)
-        let models: [[String: Any]] = [
-            [
-                "model_display_name": "VP: Kiro Sonnet 4.5",
-                "model": "[Kiro] claude-sonnet-4-5",
+        let available = fetchProxyModelIDs(port: proxyPort)
+        var models: [[String: Any]] = []
+        if let anthropicModel = resolveLiveModel(anthropicModelPreferences, port: proxyPort, available: available) {
+            models.append([
+                "model_display_name": "VP: \(anthropicModel)",
+                "model": anthropicModel,
                 "base_url": baseURL,
                 "api_key": apiKey,
                 "provider": "anthropic",
-            ],
-            [
-                "model_display_name": "VP: Codex GPT-5.5",
-                "model": "[Codex] gpt-5.5",
+            ])
+        }
+        if let openAIModel = resolveLiveModel(openAIModelPreferences, port: proxyPort, available: available) {
+            models.append([
+                "model_display_name": "VP: \(openAIModel)",
+                "model": openAIModel,
                 "base_url": "\(baseURL)/v1",
                 "api_key": apiKey,
                 "provider": "openai",
-            ],
-            [
-                "model_display_name": "VP: Antigravity Claude",
-                "model": "[Antigravity] claude-sonnet-4-6",
-                "base_url": baseURL,
-                "api_key": apiKey,
-                "provider": "anthropic",
-            ],
-        ]
+            ])
+        }
         // Merge: replace previous VibeProxy-tagged entries, keep user custom models.
         let existing = root["custom_models"] as? [[String: Any]] ?? []
         let kept = existing.filter { entry in
@@ -418,6 +420,35 @@ enum CLIHarnessAutoconfigure {
         } catch {
             return nil
         }
+    }
+
+    /// Anthropic-format IDs to pin, best first. Must be plain catalog IDs: the
+    /// proxy has no provider-scoped `[Provider] model` namespace.
+    static let anthropicModelPreferences = [
+        "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4-6",
+        "claude-opus-4-5-20251101",
+        "claude-sonnet-4-20250514",
+    ]
+
+    static let openAIModelPreferences = [
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+    ]
+
+    /// First preference the proxy actually advertises, or nil when none match.
+    static func resolveLiveModel(_ preferences: [String], port: Int, available: [String]? = nil) -> String? {
+        let ids = available ?? fetchProxyModelIDs(port: port)
+        guard !ids.isEmpty else { return nil }
+        return preferences.first(where: ids.contains)
+    }
+
+    /// OpenCode model keys cannot carry spaces or brackets.
+    static func openCodeModelKey(_ id: String) -> String {
+        id.replacingOccurrences(of: "[", with: "")
+            .replacingOccurrences(of: "]", with: "")
+            .replacingOccurrences(of: " ", with: "-")
     }
 
     private static func fetchProxyModelIDs(port: Int) -> [String] {

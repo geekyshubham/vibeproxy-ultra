@@ -538,6 +538,7 @@ extension ServiceType {
         case .codebuddy: return "codebuddy"
         case .gitlab: return "gitlab"
         case .kilo: return "kilo"
+        case .opencodeGo: return ProviderCatalog.openCodeGoProviderName
         case .qwen: return nil
         }
     }

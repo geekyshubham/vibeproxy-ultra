@@ -919,7 +919,7 @@ struct SettingsView: View {
                         iconSystemName: "bolt.horizontal.circle.fill",
                         accounts: authManager.accounts(for: .kiro),
                         isAuthenticating: authenticatingService == .kiro,
-                        helpText: "Kiro uses Google OAuth by default. If you're already signed into Kiro IDE, import that session below.",
+                        helpText: "Add Account opens AWS Builder ID login in your browser. Import a signed-in Kiro IDE session below, or paste token JSON.",
                         isEnabled: serverManager.isProviderEnabled("kiro"),
                         isToggleLocked: serverManager.isProviderToggleLocked("kiro"),
                         toggleHelpText: serverManager.providerConfigLockReason("kiro"),
@@ -963,7 +963,7 @@ struct SettingsView: View {
                         iconSystemName: nil,
                         accounts: authManager.accounts(for: .copilot),
                         isAuthenticating: authenticatingService == .copilot,
-                        helpText: "GitHub Copilot provides access to Claude, GPT, Gemini and other models via your Copilot subscription.",
+                        helpText: "Add Account imports a signed-in GitHub Copilot CLI/app session. Paste token JSON if Copilot is not installed.",
                         isEnabled: serverManager.isProviderEnabled("github-copilot"),
                         isToggleLocked: serverManager.isProviderToggleLocked("github-copilot"),
                         toggleHelpText: serverManager.providerConfigLockReason("github-copilot"),
@@ -991,7 +991,7 @@ struct SettingsView: View {
                         toggleHelpText: serverManager.providerConfigLockReason("qwen"),
                         disabledReasonText: serverManager.providerConfigLockReason("qwen"),
                         customTitle: nil,
-                        onConnect: { showingQwenEmailPrompt = true },
+                        onConnect: { pasteJSONRequest = PasteJSONRequest(type: .qwen) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .qwen) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
@@ -1029,7 +1029,7 @@ struct SettingsView: View {
                         iconSystemName: "cursorarrow.click.2",
                         accounts: authManager.accounts(for: .cursor),
                         isAuthenticating: authenticatingService == .cursor,
-                        helpText: "Cursor subscription via OAuth or pasted tokens. Quota shows Total / Auto + Composer / API usage. Switch injects the account into the Cursor app.",
+                        helpText: "Add Account imports the signed-in Cursor app session. Quota shows Total / Auto + Composer / API usage. Switch injects the account into Cursor.",
                         isEnabled: serverManager.isProviderEnabled("cursor"),
                         isToggleLocked: serverManager.isProviderToggleLocked("cursor"),
                         toggleHelpText: serverManager.providerConfigLockReason("cursor"),
@@ -1051,13 +1051,13 @@ struct SettingsView: View {
                         iconSystemName: "person.2.wave.2.fill",
                         accounts: authManager.accounts(for: .codebuddy),
                         isAuthenticating: authenticatingService == .codebuddy,
-                        helpText: "CodeBuddy browser OAuth (Tencent coding assistant).",
+                        helpText: "Paste CodeBuddy token JSON. This build has no in-app OAuth for CodeBuddy.",
                         isEnabled: serverManager.isProviderEnabled("codebuddy"),
                         isToggleLocked: serverManager.isProviderToggleLocked("codebuddy"),
                         toggleHelpText: serverManager.providerConfigLockReason("codebuddy"),
                         disabledReasonText: serverManager.providerConfigLockReason("codebuddy"),
                         customTitle: nil,
-                        onConnect: { connectService(.codebuddy) },
+                        onConnect: { pasteJSONRequest = PasteJSONRequest(type: .codebuddy) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .codebuddy) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
@@ -1073,13 +1073,13 @@ struct SettingsView: View {
                         iconSystemName: "chevron.left.forwardslash.chevron.right",
                         accounts: authManager.accounts(for: .gitlab),
                         isAuthenticating: authenticatingService == .gitlab,
-                        helpText: "GitLab Duo OAuth for Duo Chat models via CLIProxy.",
+                        helpText: "Paste GitLab Duo token JSON. This build has no in-app OAuth for GitLab Duo.",
                         isEnabled: serverManager.isProviderEnabled("gitlab"),
                         isToggleLocked: serverManager.isProviderToggleLocked("gitlab"),
                         toggleHelpText: serverManager.providerConfigLockReason("gitlab"),
                         disabledReasonText: serverManager.providerConfigLockReason("gitlab"),
                         customTitle: nil,
-                        onConnect: { connectService(.gitlab) },
+                        onConnect: { pasteJSONRequest = PasteJSONRequest(type: .gitlab) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .gitlab) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
@@ -1095,13 +1095,13 @@ struct SettingsView: View {
                         iconSystemName: "scalemass.fill",
                         accounts: authManager.accounts(for: .kilo),
                         isAuthenticating: authenticatingService == .kilo,
-                        helpText: "Kilo AI device-flow login via CLIProxy.",
+                        helpText: "Paste Kilo token JSON. This build has no in-app OAuth for Kilo.",
                         isEnabled: serverManager.isProviderEnabled("kilo"),
                         isToggleLocked: serverManager.isProviderToggleLocked("kilo"),
                         toggleHelpText: serverManager.providerConfigLockReason("kilo"),
                         disabledReasonText: serverManager.providerConfigLockReason("kilo"),
                         customTitle: nil,
-                        onConnect: { connectService(.kilo) },
+                        onConnect: { pasteJSONRequest = PasteJSONRequest(type: .kilo) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .kilo) },
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
@@ -1439,6 +1439,9 @@ struct SettingsView: View {
         case .promptForZAIAPIKey:
             authenticatingService = nil
             return // handled separately with API key prompt
+        case .managedInSettings:
+            authenticatingService = nil
+            return // custom provider keys are added in the providers section
         }
         
         serverManager.runAuthCommand(command) { success, output in
@@ -1458,14 +1461,26 @@ struct SettingsView: View {
                     self.showingAuthResult = true
                 } else {
                     self.authResultSuccess = false
-                    self.authResultMessage = """
-                    Authentication failed or no credentials were saved.
+                    let usesBrowserOAuth: Bool = {
+                        if case .authCommand(let command) = serviceType.connectionAction {
+                            return command.opensBrowser
+                        }
+                        return false
+                    }()
+                    if usesBrowserOAuth {
+                        self.authResultMessage = """
+                        Authentication failed or no credentials were saved.
 
-                    Complete the browser login fully (and pick the right ChatGPT workspace for Codex).
-                    If the browser closed early, try again.
+                        Complete the browser login fully (and pick the right ChatGPT workspace for Codex).
+                        If the browser closed early, try again.
 
-                    Details: \(output.isEmpty ? "No output from authentication process" : output)
-                    """
+                        Details: \(output.isEmpty ? "No output from authentication process" : output)
+                        """
+                    } else {
+                        self.authResultMessage = output.isEmpty
+                            ? "Could not add this account. Paste token JSON, or import a signed-in desktop app."
+                            : output
+                    }
                     self.showingAuthResult = true
                 }
             }

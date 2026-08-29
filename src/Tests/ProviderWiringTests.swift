@@ -2,6 +2,35 @@ import XCTest
 @testable import CLIProxyMenuBar
 
 final class ProviderWiringTests: XCTestCase {
+    func testOpenCodeGoWindowsMapZenUsagePayload() {
+        let json = """
+        {"usage":{"rolling":{"status":"ok","percent":0,"resetsAt":"2026-08-30T01:04:17.875Z"},
+        "weekly":{"status":"ok","percent":19,"resetsAt":"2026-08-31T00:00:00.875Z"},
+        "monthly":{"status":"rate-limited","percent":42,"resetsAt":"2026-09-29T12:00:21.875Z"}}}
+        """
+        let root = try! JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+        let windows = NativeUsageFetcher.openCodeGoWindows(from: root["usage"] as! [String: Any])
+
+        XCTAssertEqual(windows.count, 3)
+        XCTAssertEqual(windows.map(\.label), ["5-hour", "Weekly", "Monthly"])
+        XCTAssertEqual(windows.map(\.windowMinutes), [300, 10_080, 43_200])
+        XCTAssertEqual(windows[0].usedPercent, 0)
+        XCTAssertEqual(windows[1].usedPercent, 19)
+        // rate-limited overrides a lagging percent — the bucket is exhausted.
+        XCTAssertEqual(windows[2].usedPercent, 100)
+        XCTAssertNotNil(windows[1].resetsAt)
+    }
+
+    func testOpenCodeGoAuthFileMapsToServiceType() {
+        let raw: [String: Any] = ["type": "openai-compat", "provider": "opencode-go"]
+        XCTAssertEqual(AuthManager.serviceType(forAuthType: "openai-compat", raw: raw), .opencodeGo)
+
+        let other: [String: Any] = ["type": "openai-compat", "provider": "some-other"]
+        XCTAssertNil(AuthManager.serviceType(forAuthType: "openai-compat", raw: other))
+        XCTAssertEqual(AuthManager.serviceType(forAuthType: "kiro", raw: [:]), .kiro)
+    }
+
+
     func testConnectionActionMatchesExistingProviderFlows() {
         XCTAssertEqual(ServiceType.claude.connectionAction, .authCommand(.claudeLogin))
         XCTAssertEqual(ServiceType.codex.connectionAction, .authCommand(.codexLogin))

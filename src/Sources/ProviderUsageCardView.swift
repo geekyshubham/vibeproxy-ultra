@@ -409,7 +409,7 @@ struct ProviderUsageCardView: View {
         case .kiro: "icon-kiro.png"
         case .kimi: "icon-kimi.png"
         case .grok: "icon-grok.png"
-        case .cursor, .codebuddy, .gitlab, .kilo: nil
+        case .cursor, .codebuddy, .gitlab, .kilo, .opencodeGo: nil
         }
         guard let name else { return nil }
         return IconCatalog.shared.image(named: name, resizedTo: NSSize(width: 18, height: 18), template: true)

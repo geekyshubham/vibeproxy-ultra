@@ -13,7 +13,7 @@ enum ConfiguredAccountImporter {
     ) -> ConfiguredAccountImportResult {
         switch account.importKind {
         case .kiroIDE:
-            return .failure(message: "Kiro import uses the CLI import command")
+            return importKiroIDE(authDirectory: authDirectory)
         case .codexApp:
             return importCodexApp(authDirectory: authDirectory, displayName: account.displayName)
         case .codexOpenCode:
@@ -51,6 +51,113 @@ enum ConfiguredAccountImporter {
             return .success(message: "Imported Z.AI API key to \(filePath.lastPathComponent)")
         } catch {
             return .failure(message: error.localizedDescription)
+        }
+    }
+
+    /// Kiro IDE / AWS SSO cache. The bundled proxy has no `-kiro-login` / `-kiro-import`.
+    static let kiroIDETokenRelativePaths = [
+        ".aws/sso/cache/kiro-auth-token.json",
+        ".kiro/kiro-auth-token.json",
+    ]
+
+    static func importKiroIDE(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        authDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cli-proxy-api")
+    ) -> ConfiguredAccountImportResult {
+        if let merged = mergeKiroSSOCacheOntoAWSFiles(home: home, authDirectory: authDirectory) {
+            return merged
+        }
+        var lastFailure = "No Kiro IDE session found. Sign into Kiro IDE first, then try again — or paste token JSON."
+        for rel in kiroIDETokenRelativePaths {
+            let url = home.appendingPathComponent(rel)
+            guard FileManager.default.fileExists(atPath: url.path),
+                  let text = try? String(contentsOf: url, encoding: .utf8),
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { continue }
+            switch ManualTokenImporter.importPasted(
+                text,
+                preferredType: .kiro,
+                authDirectory: authDirectory,
+                overwrite: true
+            ) {
+            case .success(let message):
+                return .success(message: message)
+            case .failure(let message):
+                lastFailure = message
+            }
+        }
+        return .failure(message: lastFailure)
+    }
+
+    /// Overlay live SSO-cache tokens onto an existing AWS Builder ID file (keeps client_id/secret).
+    static func mergeKiroSSOCacheOntoAWSFiles(
+        home: URL,
+        authDirectory: URL
+    ) -> ConfiguredAccountImportResult? {
+        var cache: [String: Any]?
+        for rel in kiroIDETokenRelativePaths {
+            let url = home.appendingPathComponent(rel)
+            if let payload = NativeUsageFetcher.readAuthPayload(at: url) {
+                cache = payload
+                break
+            }
+        }
+        guard let cache,
+              let access = (cache["accessToken"] as? String) ?? (cache["access_token"] as? String),
+              !access.isEmpty
+        else { return nil }
+        let hash = ((cache["clientIdHash"] as? String) ?? (cache["client_id_hash"] as? String) ?? "")
+            .lowercased()
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: authDirectory,
+            includingPropertiesForKeys: nil
+        ) else { return nil }
+        for file in files where file.pathExtension == "json" {
+            guard var existing = NativeUsageFetcher.readAuthPayload(at: file),
+                  (existing["type"] as? String)?.lowercased() == "kiro"
+            else { continue }
+            let existingHash = ((existing["client_id_hash"] as? String) ?? "").lowercased()
+            let existingID = (existing["client_id"] as? String).map(KiroAWSAuth.clientIDHash) ?? ""
+            let hashMatch = !hash.isEmpty && (hash == existingHash || hash == existingID.lowercased())
+            guard hashMatch else { continue }
+            let cacheExp = (cache["expiresAt"] as? String) ?? (cache["expires_at"] as? String)
+            let fileExp = (existing["expires_at"] as? String) ?? (existing["expired"] as? String)
+            if let cacheExp, let fileExp, cacheExp <= fileExp { continue }
+            existing["access_token"] = access
+            existing["accessToken"] = access
+            if let refresh = (cache["refreshToken"] as? String) ?? (cache["refresh_token"] as? String) {
+                existing["refresh_token"] = refresh
+                existing["refreshToken"] = refresh
+            }
+            if let exp = (cache["expiresAt"] as? String) ?? (cache["expires_at"] as? String) {
+                existing["expired"] = exp
+                existing["expires_at"] = exp
+            }
+            existing["last_refresh"] = ISO8601DateFormatter().string(from: Date())
+            guard let data = try? JSONSerialization.data(
+                withJSONObject: existing,
+                options: [.prettyPrinted, .sortedKeys]
+            ) else { continue }
+            try? data.write(to: file, options: [.atomic])
+            NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
+            return .success(message: "Updated Kiro AWS account from the local IDE session (\(file.lastPathComponent)).")
+        }
+        return nil
+    }
+
+    static func importFromDesktopApp(for command: AuthCommand) -> ConfiguredAccountImportResult {
+        let authDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cli-proxy-api")
+        switch command {
+        case .kiroImport:
+            return importKiroIDE(authDirectory: authDirectory)
+        case .cursorLogin:
+            return importCursorApp(authDirectory: authDirectory, displayName: "Cursor")
+        case .copilotLogin:
+            return importCopilotApp(authDirectory: authDirectory, displayName: "")
+        default:
+            return .failure(message: command.missingOAuthMessage)
         }
     }
 
@@ -334,7 +441,8 @@ enum ConfiguredAccountImporter {
             record,
             filename: "github-copilot-\(sanitizeFilename(username)).json",
             authDirectory: authDirectory,
-            successLabel: "Imported \(username) from GitHub Copilot"
+            successLabel: "Imported \(username) from GitHub Copilot",
+            overwrite: true
         )
     }
 
@@ -543,7 +651,8 @@ enum ConfiguredAccountImporter {
             record,
             filename: "cursor-\(sanitizeFilename(email)).json",
             authDirectory: authDirectory,
-            successLabel: "Imported \(email) from Cursor"
+            successLabel: "Imported \(email) from Cursor",
+            overwrite: true
         )
     }
 
@@ -553,12 +662,13 @@ enum ConfiguredAccountImporter {
         _ record: [String: Any],
         filename: String,
         authDirectory: URL,
-        successLabel: String
+        successLabel: String,
+        overwrite: Bool = false
     ) -> ConfiguredAccountImportResult {
         do {
             try FileManager.default.createDirectory(at: authDirectory, withIntermediateDirectories: true)
             let destination = authDirectory.appendingPathComponent(filename)
-            if FileManager.default.fileExists(atPath: destination.path) {
+            if !overwrite, FileManager.default.fileExists(atPath: destination.path) {
                 return .failure(message: "Account already exists at \(filename)")
             }
             let data = try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])

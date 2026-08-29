@@ -16,7 +16,11 @@ enum ServiceType: String, CaseIterable {
     case codebuddy
     case gitlab
     case kilo
-    
+    /// OpenCode Zen "Go" subscription. Stored as an `openai-compat` auth file
+    /// (`provider: opencode-go`), not an OAuth seat, but it has real quota
+    /// windows so it gets a usage card like any other provider.
+    case opencodeGo = "opencode-go"
+
     var displayName: String {
         switch self {
         case .claude: return "Claude Code"
@@ -33,6 +37,7 @@ enum ServiceType: String, CaseIterable {
         case .codebuddy: return "CodeBuddy"
         case .gitlab: return "GitLab Duo"
         case .kilo: return "Kilo AI"
+        case .opencodeGo: return ProviderCatalog.openCodeGoDisplayName
         }
     }
 }
@@ -145,6 +150,18 @@ class AuthManager: ObservableObject {
         applyAccounts(scanned)
     }
 
+    /// Maps an auth file's `type` to a ServiceType. Custom openai-compatibility
+    /// credentials share `type: "openai-compat"`, so they are disambiguated by
+    /// their `provider` field — OpenCode Go is the one with real quota windows.
+    static func serviceType(forAuthType type: String, raw: [String: Any]) -> ServiceType? {
+        let normalized = type.lowercased()
+        if normalized == CustomProviderCredentialStore.authType {
+            let provider = (raw["provider"] as? String)?.lowercased()
+            return provider == ProviderCatalog.openCodeGoProviderName ? .opencodeGo : nil
+        }
+        return ServiceType(rawValue: normalized)
+    }
+
     private func scanAuthDirectory() -> [ServiceType: [AuthAccount]] {
         let authDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cli-proxy-api")
 
@@ -167,15 +184,18 @@ class AuthManager: ObservableObject {
 
             for file in files where file.pathExtension == "json" {
                 guard let data = try? Data(contentsOf: file),
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let type = json["type"] as? String,
-                      let serviceType = ServiceType(rawValue: type.lowercased())
+                      let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let type = raw["type"] as? String,
+                      let serviceType = Self.serviceType(forAuthType: type, raw: raw)
                 else {
                     continue
                 }
+                let json = TokenRefreshService.flattenedAuth(raw)
 
                 let email = json["email"] as? String
-                let login = json["login"] as? String ?? json["username"] as? String
+                let login = json["login"] as? String
+                    ?? json["username"] as? String
+                    ?? (serviceType == .opencodeGo ? json["label"] as? String : nil)
                 let isDisabled = json["disabled"] as? Bool ?? false
                 let planLabel = Self.extractPlanLabel(from: json, serviceType: serviceType)
 
@@ -461,22 +481,21 @@ class AuthManager: ObservableObject {
 
     /// Returns a date only when the *session* is truly unusable (needs re-login).
     /// Access-token timestamps alone do not count if a refresh token is present.
-    private static func sessionExpiryDate(from json: [String: Any], serviceType: ServiceType) -> Date? {
+    static func sessionExpiryDate(from json: [String: Any], serviceType: ServiceType) -> Date? {
         // API-key providers never expire from access-token clocks.
         if serviceType == .zai {
             return nil
         }
 
+        let json = TokenRefreshService.flattenedAuth(json)
         let refreshToken = nonEmptyString(json["refresh_token"])
             ?? nonEmptyString(json["refreshToken"])
             ?? nonEmptyString(json["refresh"])
 
-        // If the proxy can refresh, ignore short-lived access token expiry for UI/usage.
-        if let refreshToken {
-            // Only mark expired when the refresh token itself is past JWT exp (rare).
-            if let refreshExp = jwtExpiry(from: refreshToken), refreshExp < Date() {
-                return refreshExp
-            }
+        // A refresh token keeps the session alive. OpenAI refresh tokens are JWTs whose
+        // `exp` often matches the access token (~10d) — that is NOT session death.
+        // Keep-alive / usage-fetch refresh owns rotation; only a failed refresh is a re-login.
+        if refreshToken != nil {
             return nil
         }
 

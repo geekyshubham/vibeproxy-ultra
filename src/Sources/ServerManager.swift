@@ -83,7 +83,17 @@ class ServerManager: ObservableObject {
 
     /// Helper class to capture output text across closures
     private class OutputCapture {
-        var text = ""
+        private let lock = NSLock()
+        private var storage = ""
+        var text: String {
+            get { lock.lock(); defer { lock.unlock() }; return storage }
+            set { lock.lock(); defer { lock.unlock() }; storage = newValue }
+        }
+        func append(_ chunk: String) {
+            lock.lock()
+            storage += chunk
+            lock.unlock()
+        }
     }
     private var logBuffer: RingBuffer<String>
     private let maxLogLines = 1000
@@ -107,8 +117,6 @@ class ServerManager: ObservableObject {
         static let geminiDefaultProjectAcceptDelay: TimeInterval = 3.0
         /// Delay before sending newline to keep Codex login waiting for browser callback
         static let codexCallbackKeepaliveDelay: TimeInterval = 12.0
-        /// Delay before sending Qwen email after OAuth completion (conservative to allow for network/user interaction)
-        static let qwenEmailSubmissionDelay: TimeInterval = 10.0
     }
     
     private enum CustomProviderConstants {
@@ -352,6 +360,41 @@ class ServerManager: ObservableObject {
         terminateActiveAuthProcessIfNeeded(reason: "starting a new auth attempt")
         cleanupStaleAuthProcesses()
 
+        if command == .kiroLogin {
+            Task {
+                let result = await KiroAWSAuth.addAccount()
+                await MainActor.run {
+                    switch result {
+                    case .success(let message):
+                        completion(true, message)
+                    case .failure(let message):
+                        completion(false, message)
+                    }
+                }
+            }
+            return
+        }
+
+        if command.importsFromDesktopApp {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = ConfiguredAccountImporter.importFromDesktopApp(for: command)
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let message):
+                        completion(true, message)
+                    case .failure(let message):
+                        completion(false, message)
+                    }
+                }
+            }
+            return
+        }
+
+        guard let loginFlag = command.proxyLoginFlag else {
+            completion(false, command.missingOAuthMessage)
+            return
+        }
+
         // Use bundled binary from app bundle
         guard let resourcePath = Bundle.main.resourcePath else {
             completion(false, "Could not find resource path")
@@ -373,39 +416,7 @@ class ServerManager: ObservableObject {
             return
         }
         
-        var qwenEmail: String?
-        
-        switch command {
-        case .claudeLogin:
-            authProcess.arguments = ["--config", configPath, "-claude-login"]
-        case .codexLogin:
-            authProcess.arguments = ["--config", configPath, "-codex-login"]
-        case .copilotLogin:
-            authProcess.arguments = ["--config", configPath, "-github-copilot-login"]
-        case .geminiLogin:
-            authProcess.arguments = ["--config", configPath, "-login"]
-        case .kimiLogin:
-            authProcess.arguments = ["--config", configPath, "-kimi-login"]
-        case .qwenLogin(let email):
-            authProcess.arguments = ["--config", configPath, "-qwen-login"]
-            qwenEmail = email
-        case .antigravityLogin:
-            authProcess.arguments = ["--config", configPath, "-antigravity-login"]
-        case .kiroLogin:
-            authProcess.arguments = ["--config", configPath, "-kiro-login"]
-        case .kiroImport:
-            authProcess.arguments = ["--config", configPath, "-kiro-import"]
-        case .xaiLogin:
-            authProcess.arguments = ["--config", configPath, "-xai-login"]
-        case .cursorLogin:
-            authProcess.arguments = ["--config", configPath, "-cursor-login"]
-        case .codebuddyLogin:
-            authProcess.arguments = ["--config", configPath, "-codebuddy-login"]
-        case .gitlabLogin:
-            authProcess.arguments = ["--config", configPath, "-gitlab-login"]
-        case .kiloLogin:
-            authProcess.arguments = ["--config", configPath, "-kilo-login"]
-        }
+        authProcess.arguments = ["--config", configPath, "-\(loginFlag)"]
         
         // Create pipes for output
         let outputPipe = Pipe()
@@ -443,28 +454,11 @@ class ServerManager: ObservableObject {
             }
         }
         
-        // For Qwen login, automatically send email after OAuth completes
-        // NOTE: Delay chosen to ensure OAuth browser flow completes before submitting email.
-        // This is a conservative estimate - OAuth typically completes in 5-8 seconds, but network
-        // conditions and user interaction time can vary. Future improvement: monitor authProcess
-        // output or termination handler to detect OAuth completion signal and submit immediately.
-        if let email = qwenEmail {
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Timing.qwenEmailSubmissionDelay) {
-                // Send email after OAuth completion
-                if authProcess.isRunning {
-                    if let data = "\(email)\n".data(using: .utf8) {
-                        try? inputPipe.fileHandleForWriting.write(contentsOf: data)
-                        NSLog("[Auth] Sent Qwen email: %@", email)
-                    }
-                }
-            }
-        }
-
         // Capture all provider output (not just Copilot) for diagnostics / device codes.
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
-                capture.text += str
+                capture.append(str)
                 if case .copilotLogin = command {
                     NSLog("[Auth] Copilot output: %@", str)
                 }
@@ -473,7 +467,7 @@ class ServerManager: ObservableObject {
         errorPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
-                capture.text += str
+                capture.append(str)
             }
         }
         
@@ -1332,4 +1326,36 @@ enum AuthCommand: Equatable {
     case codebuddyLogin
     case gitlabLogin
     case kiloLogin
+
+    /// Login flags this bundled `cli-proxy-api-plus` actually implements.
+    /// Anything else must not be spawned — Go `flag.Parse` exits immediately and
+    /// concurrent stdout/stderr capture used to crash the menu bar app.
+    var proxyLoginFlag: String? {
+        switch self {
+        case .claudeLogin: return "claude-login"
+        case .codexLogin: return "codex-login"
+        case .geminiLogin: return "login"
+        case .kimiLogin: return "kimi-login"
+        case .antigravityLogin: return "antigravity-login"
+        case .xaiLogin: return "xai-login"
+        default: return nil
+        }
+    }
+
+    var importsFromDesktopApp: Bool {
+        switch self {
+        case .kiroImport, .cursorLogin, .copilotLogin:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var opensBrowser: Bool {
+        proxyLoginFlag != nil || self == .kiroLogin
+    }
+
+    var missingOAuthMessage: String {
+        "This build has no in-app OAuth login for this provider. Paste token JSON, or import a signed-in desktop app."
+    }
 }

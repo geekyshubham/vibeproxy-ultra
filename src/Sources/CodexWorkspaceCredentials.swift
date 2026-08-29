@@ -598,6 +598,34 @@ enum CodexWorkspaceCredentials {
         }
     }
 
+    /// Codex CLI/desktop persist the live session here first; `~/.codex/auth.json` can lag.
+    static func readKeychain(codexHome: URL) -> [String: Any]? {
+        let account = keychainAccountName(codexHome: codexHome)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = [
+            "find-generic-password",
+            "-s", keychainService,
+            "-a", account,
+            "-w",
+        ]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard !output.isEmpty,
+              let json = try? JSONSerialization.jsonObject(with: output) as? [String: Any]
+        else { return nil }
+        return json
+    }
+
     // MARK: - IO
 
     private static func readJSON(_ url: URL) -> [String: Any]? {

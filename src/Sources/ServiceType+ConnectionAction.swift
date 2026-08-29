@@ -2,6 +2,9 @@ enum ServiceConnectionAction: Equatable {
     case authCommand(AuthCommand)
     case promptForQwenEmail
     case promptForZAIAPIKey
+    /// Credentials live in the custom openai-compatibility section of Settings,
+    /// so there is no auth command to run.
+    case managedInSettings
 }
 
 extension ServiceType {
@@ -35,6 +38,8 @@ extension ServiceType {
             return .authCommand(.gitlabLogin)
         case .kilo:
             return .authCommand(.kiloLogin)
+        case .opencodeGo:
+            return .managedInSettings
         }
     }
 }

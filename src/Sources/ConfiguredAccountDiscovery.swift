@@ -57,6 +57,10 @@ enum ConfiguredAccountDiscovery {
         case .codebuddy, .gitlab, .kilo:
             // OAuth / paste-JSON onboarding (no stable local import paths yet).
             return []
+        case .opencodeGo:
+            // Discovered as a custom openai-compatibility provider instead —
+            // see discoverOpenCodeCustomProviders().
+            return []
         }
     }
 

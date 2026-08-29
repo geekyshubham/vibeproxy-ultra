@@ -31,6 +31,7 @@ enum MenuBarDesign {
         case .codebuddy: return Color(red: 0.10, green: 0.55, blue: 0.95)
         case .gitlab: return Color(red: 0.88, green: 0.30, blue: 0.22)
         case .kilo: return Color(red: 0.35, green: 0.75, blue: 0.45)
+        case .opencodeGo: return Color(red: 0.20, green: 0.72, blue: 0.80)
         }
     }
 

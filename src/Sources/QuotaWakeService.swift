@@ -110,7 +110,8 @@ enum QuotaWakeService {
 
     // MARK: - Model discovery
 
-    /// CLIProxyAPIPlus advertises provider-scoped IDs like `[Codex] gpt-5.4-mini`.
+    /// Resolves wake models from the proxy's live `/v1/models` catalog. IDs are
+    /// plain (`gpt-5.4-mini`); there is no `[Provider] model` namespace.
     private static func resolveWakeModels(for type: ServiceType, proxyPort: Int) async -> [String] {
         let ports = uniquePorts(proxyPort)
         var discovered: [String] = []
@@ -139,8 +140,11 @@ enum QuotaWakeService {
         for fallback in preferredFallbackModels(for: type) where !models.contains(fallback) {
             models.append(fallback)
         }
-        // Last-resort universal cheap models that often route somewhere.
-        for fallback in ["gpt-4o-mini", "gpt-5.4-mini", "claude-sonnet-4", "gemini-2.5-flash"]
+        // Universal fallbacks route to whichever provider owns them, so they must
+        // never stand in for a provider the proxy cannot serve — that would report
+        // a successful wake after pinging somebody else's quota.
+        guard hasServableModels(type) else { return models }
+        for fallback in ["gpt-5.4-mini", "claude-sonnet-4-20250514", "gemini-3-flash"]
             where !models.contains(fallback)
         {
             models.append(fallback)
@@ -167,49 +171,46 @@ enum QuotaWakeService {
         switch type {
         case .codex:
             return [
-                "[Codex] gpt-5.4-mini",
-                "[Codex] gpt-5.5",
-                "[Codex] gpt-5.4",
                 "gpt-5.4-mini",
-                "gpt-4o-mini",
+                "gpt-5.4",
+                "gpt-5.5",
             ]
         case .claude:
             return [
-                "claude-sonnet-4",
+                "claude-3-5-haiku-20241022",
                 "claude-sonnet-4-20250514",
-                "[Antigravity] claude-sonnet-4-6",
+                "claude-sonnet-4-5-20250929",
             ]
         case .antigravity:
             return [
-                "[Antigravity] gemini-3.5-flash-low",
-                "[Antigravity] gemini-3-flash",
-                "[Antigravity] gemini-3.1-flash-lite",
-                "[Antigravity] claude-sonnet-4-6",
+                "gemini-3.5-flash-extra-low",
+                "gemini-3.5-flash-low",
+                "gemini-3-flash",
             ]
         case .gemini:
             return [
-                "[Antigravity] gemini-3.5-flash-low",
-                "gemini-2.5-flash",
-                "gemini-2.0-flash",
-            ]
-        case .copilot:
-            return [
-                "[github-copilot] gpt-4o-mini",
-                "[github-copilot] gpt-5-mini",
-                "gpt-4o-mini",
-            ]
-        case .kiro:
-            return [
-                "[Kiro] auto",
-                "[Kiro] claude-haiku-4-5",
-                "[Kiro] claude-sonnet-4",
+                "gemini-3-flash",
+                "gemini-3.1-flash-lite",
             ]
         case .zai:
-            return ["glm-4.7", "glm-5", "glm-4.6"]
+            return ["glm-5.1", "glm-5.2"]
         case .grok:
-            return ["grok-3", "grok-2", "grok-3-mini"]
+            return ["grok-3-mini", "grok-3-mini-fast"]
         default:
-            return ["gpt-4o-mini"]
+            // Kiro and Copilot have no executor in the bundled proxy, so there is
+            // no model to wake; returning none keeps the failure honest.
+            return []
+        }
+    }
+
+    /// Providers the bundled proxy can actually route a request to. Kiro and
+    /// Copilot ship auth + usage metering only — no server-side executor.
+    private static func hasServableModels(_ type: ServiceType) -> Bool {
+        switch type {
+        case .kiro, .copilot:
+            return false
+        default:
+            return true
         }
     }
 

@@ -127,6 +127,11 @@ enum ManualTokenImporter {
                 return try normalizeZai(key: key)
             }
             throw ImportError.missingField("api_key")
+        case .opencodeGo:
+            // Stored by CustomProviderCredentialStore, not as a pasted auth record.
+            throw ImportError.message(
+                "Add \(ServiceType.opencodeGo.displayName) keys under Settings → Providers, not by pasting a token."
+            )
         }
     }
 
@@ -340,7 +345,7 @@ enum ManualTokenImporter {
             ?? "kiro-account"
         let region = firstString(raw, keys: ["region"]) ?? "us-east-1"
         let now = Date()
-        let record: [String: Any] = [
+        var record: [String: Any] = [
             "type": "kiro",
             "email": email,
             "access_token": access,
@@ -351,9 +356,26 @@ enum ManualTokenImporter {
             "expired": firstString(raw, keys: ["expired", "expires_at", "expiresAt"]) ?? iso(now.addingTimeInterval(3600)),
             "last_refresh": iso(now),
         ]
+        for key in ["client_id", "clientId", "client_secret", "clientSecret", "client_id_hash", "clientIdHash", "auth_method", "authMethod", "provider", "start_url", "profile_arn"] {
+            if let value = firstString(raw, keys: [key]) {
+                switch key {
+                case "clientId": record["client_id"] = value
+                case "clientSecret": record["client_secret"] = value
+                case "clientIdHash": record["client_id_hash"] = value
+                case "authMethod": record["auth_method"] = value
+                default: record[key] = value
+                }
+            }
+        }
+        let filename: String
+        if let clientID = firstString(raw, keys: ["client_id", "clientId"]) {
+            filename = KiroAWSAuth.filename(clientID: clientID)
+        } else {
+            filename = "kiro-\(sanitize(email)).json"
+        }
         return ParsedAccount(
             type: .kiro,
-            filename: "kiro-\(sanitize(email)).json",
+            filename: filename,
             displayName: email,
             record: record
         )

@@ -134,6 +134,178 @@ final class TokenRefreshServiceTests: XCTestCase {
         XCTAssertFalse(TokenRefreshService.sameCodexSeat(team, as: go))
     }
 
+    func testShouldRefreshSeesNestedRefreshToken() {
+        let iat = Date().addingTimeInterval(-8 * 24 * 60 * 60)
+        let exp = Date().addingTimeInterval(2 * 24 * 60 * 60)
+        let payload: [String: Any] = [
+            "type": "codex",
+            "tokens": [
+                "refresh_token": "rt.1.nested",
+                "access_token": Self.jwt(iat: iat, exp: exp),
+            ],
+        ]
+        XCTAssertTrue(TokenRefreshService.shouldRefresh(payload: payload))
+    }
+
+    func testFlattenedAuthCopiesNestedTokens() {
+        let flat = TokenRefreshService.flattenedAuth([
+            "type": "codex",
+            "email": "a@x.com",
+            "tokens": [
+                "access_token": "at",
+                "refresh_token": "rt",
+            ],
+        ])
+        XCTAssertEqual(flat["access_token"] as? String, "at")
+        XCTAssertEqual(flat["refresh_token"] as? String, "rt")
+        XCTAssertEqual(flat["email"] as? String, "a@x.com")
+    }
+
+    func testRefreshableCodexSessionIsNotExpiredWhenRefreshJWTExpIsPast() {
+        let deadRT = Self.jwt(
+            iat: Date().addingTimeInterval(-20 * 24 * 60 * 60),
+            exp: Date().addingTimeInterval(-60)
+        )
+        let liveAT = Self.jwt(
+            iat: Date().addingTimeInterval(-2 * 60 * 60),
+            exp: Date().addingTimeInterval(8 * 24 * 60 * 60)
+        )
+        let expiry = AuthManager.sessionExpiryDate(
+            from: [
+                "type": "codex",
+                "refresh_token": deadRT,
+                "access_token": liveAT,
+            ],
+            serviceType: .codex
+        )
+        XCTAssertNil(expiry)
+        let nested = AuthManager.sessionExpiryDate(
+            from: [
+                "type": "codex",
+                "tokens": ["refresh_token": deadRT, "access_token": liveAT],
+            ],
+            serviceType: .codex
+        )
+        XCTAssertNil(nested)
+    }
+
+    func testShouldAdoptFresherMatchingCodexCLITokens() {
+        let now = Date()
+        let live = Self.jwt(iat: now.addingTimeInterval(-60), exp: now.addingTimeInterval(3600))
+        let dead = Self.jwt(iat: now.addingTimeInterval(-7200), exp: now.addingTimeInterval(-60))
+        XCTAssertTrue(
+            NativeUsageFetcher.shouldAdoptCodexCLITokens(
+                local: [
+                    "email": "a@x.com",
+                    "access_token": live,
+                    "refresh_token": "rt-new",
+                    "account_id": "acct-1",
+                ],
+                file: [
+                    "email": "a@x.com",
+                    "access_token": dead,
+                    "refresh_token": "rt-old",
+                    "account_id": "acct-1",
+                ],
+                now: now
+            )
+        )
+    }
+
+    func testShouldNotAdoptDifferentCodexSeat() {
+        let now = Date()
+        let liveTeam = Self.jwtWithAuth(
+            accountID: "f7268a18-b7e1-42d3-b4b1-286f67b74b4d",
+            plan: "team"
+        )
+        let liveGo = Self.jwtWithAuth(
+            accountID: "b8490ad0-efd0-4413-a1f3-38e7e1dcb977",
+            plan: "go"
+        )
+        XCTAssertFalse(
+            NativeUsageFetcher.shouldAdoptCodexCLITokens(
+                local: [
+                    "email": "a@x.com",
+                    "access_token": liveTeam,
+                    "refresh_token": "rt-team",
+                ],
+                file: [
+                    "email": "a@x.com",
+                    "access_token": liveGo,
+                    "refresh_token": "rt-go",
+                ],
+                now: now
+            )
+        )
+    }
+
+    func testShouldNotAdoptOlderCLITokenOverLiveFile() {
+        let now = Date()
+        let live = Self.jwt(iat: now.addingTimeInterval(-60), exp: now.addingTimeInterval(3600))
+        let older = Self.jwt(iat: now.addingTimeInterval(-7200), exp: now.addingTimeInterval(600))
+        XCTAssertFalse(
+            NativeUsageFetcher.shouldAdoptCodexCLITokens(
+                local: [
+                    "email": "a@x.com",
+                    "access_token": older,
+                    "refresh_token": "rt-old",
+                ],
+                file: [
+                    "email": "a@x.com",
+                    "access_token": live,
+                    "refresh_token": "rt-new",
+                ],
+                now: now
+            )
+        )
+    }
+
+    func testOverlayCopiesFresherCodexCLICredentialsOntoAuthFile() throws {
+        let now = Date()
+        let live = Self.jwt(iat: now.addingTimeInterval(-60), exp: now.addingTimeInterval(3600))
+        let dead = Self.jwt(iat: now.addingTimeInterval(-7200), exp: now.addingTimeInterval(-60))
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vp-codex-overlay-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let authFile = dir.appendingPathComponent("codex-a.json")
+        try JSONSerialization.data(withJSONObject: [
+            "type": "codex",
+            "email": "a@x.com",
+            "access_token": dead,
+            "refresh_token": "rt-old",
+            "account_id": "acct-1",
+        ]).write(to: authFile)
+
+        XCTAssertTrue(
+            NativeUsageFetcher.overlayCodexCLICredentialsIfFresher(
+                onto: authFile,
+                localCodex: [
+                    "email": "a@x.com",
+                    "access_token": live,
+                    "refresh_token": "rt-new",
+                    "account_id": "acct-1",
+                ],
+                now: now
+            )
+        )
+        let updated = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: authFile))
+        XCTAssertEqual(updated["access_token"] as? String, live)
+        XCTAssertEqual(updated["refresh_token"] as? String, "rt-new")
+        XCTAssertFalse(
+            NativeUsageFetcher.overlayCodexCLICredentialsIfFresher(
+                onto: authFile,
+                localCodex: [
+                    "email": "a@x.com",
+                    "access_token": live,
+                    "refresh_token": "rt-new",
+                    "account_id": "acct-1",
+                ],
+                now: now
+            )
+        )
+    }
+
     func testCopyTokenFieldsIncludesCamelCaseAliases() {
         let original: [String: Any] = [
             "type": "cursor",

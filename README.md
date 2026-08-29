@@ -15,7 +15,7 @@
 <a href="https://github.com/Geekyshubham/vibeproxy-ultra/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Geekyshubham/vibeproxy-ultra/total?label=downloads"></a>
 </p>
 
-**VibeProxy Ultra** by **Geekyshubham** — use Claude Code, ChatGPT/Codex, Gemini, Antigravity, GitHub Copilot, Kiro, Grok, Z.AI, OpenCode, and more with local tools. **No separate API keys** for OAuth providers.
+**VibeProxy Ultra** by **Geekyshubham** — use Claude Code, ChatGPT/Codex, Gemini, Antigravity, Grok, Z.AI, OpenCode, and more with local tools. **No separate API keys** for OAuth providers. Kiro and GitHub Copilot are tracked for usage and credits only — the bundled proxy cannot route requests to them.
 
 > Live usage limits · reset countdowns · token/credit analytics · account import & switch · session keep-alive · provider status
 
@@ -29,7 +29,8 @@
 | **Codex / ChatGPT** | Plan limits, multi-subscription ranking |
 | **Claude Code** | Local proxy + log analytics (tokens, models, est. $) |
 | **Gemini / Antigravity** | Quota groups (Gemini vs Claude/Opus) |
-| **Kiro** | `kiro-cli /usage` credits + local session metering |
+| **Kiro** | `kiro-cli /usage` credits + local session metering (Kiro reports no token counts) |
+| **OpenCode Go** | 5-hour, weekly, and monthly subscription limits with reset countdowns |
 | **Analytics** | Volume + estimated API-equivalent $ by provider/model |
 | **Accounts** | Import configured apps; one-click native account switch |
 | **Sessions** | Proactive token refresh · auto “wake 5h window” |

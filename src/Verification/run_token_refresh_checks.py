@@ -57,7 +57,17 @@ def jwt_claim(token: str, key: str) -> datetime | None:
     return datetime.fromtimestamp(int(value), tz=timezone.utc)
 
 
+def flattened_auth(payload: dict) -> dict:
+    out = dict(payload)
+    tokens = payload.get("tokens")
+    if isinstance(tokens, dict):
+        for key, value in tokens.items():
+            out.setdefault(key, value)
+    return out
+
+
 def should_refresh(payload: dict, now: datetime) -> bool:
+    payload = flattened_auth(payload)
     rt = (payload.get("refresh_token") or "").strip()
     if not rt:
         return False
@@ -87,6 +97,32 @@ def grouped_by_refresh_token(jobs: list[tuple[str, str, str | None]]) -> list[li
             groups[key] = []
         groups[key].append(file)
     return [groups[k] for k in order]
+
+
+def should_adopt_codex_cli(local: dict, file: dict, now: datetime) -> bool:
+    local = flattened_auth(local)
+    file = flattened_auth(file)
+    local_token = (local.get("access_token") or "").strip()
+    if not local_token:
+        return False
+    file_token = (file.get("access_token") or "").strip() or None
+    if file_token == local_token and (local.get("refresh_token") or "") == (file.get("refresh_token") or ""):
+        return False
+    local_email = (local.get("email") or "").strip()
+    file_email = (file.get("email") or "").strip()
+    if local_email and file_email and local_email.lower() != file_email.lower():
+        return False
+    local_id = (local.get("account_id") or "").strip()
+    file_id = (file.get("account_id") or "").strip()
+    if local_id and file_id and local_id.lower() != file_id.lower():
+        return False
+    local_exp = jwt_claim(local_token, "exp") or datetime.fromtimestamp(0, tz=timezone.utc)
+    file_exp = jwt_claim(file_token or "", "exp") or datetime.fromtimestamp(0, tz=timezone.utc)
+    if local_exp <= file_exp:
+        return False
+    if local_exp <= now and file_exp > now:
+        return False
+    return True
 
 
 def copy_token_fields(updated: dict, original: dict) -> dict:
@@ -152,6 +188,56 @@ def main() -> None:
         "access_token": jwt(iat=now - timedelta(days=9), exp=now + timedelta(minutes=5)),
     }
     check("near-expiry access token still refreshes", should_refresh(near, now))
+
+    nested = {
+        "tokens": {
+            "refresh_token": "rt.1.alive",
+            "access_token": jwt(iat=now - timedelta(days=8), exp=now + timedelta(days=2)),
+        }
+    }
+    check("nested tokens.refresh_token still refreshes", should_refresh(nested, now))
+
+    def session_expiry(payload: dict) -> bool:
+        flat = flattened_auth(payload)
+        return not bool((flat.get("refresh_token") or "").strip())
+
+    check(
+        "refreshable session is not expired when RT JWT exp is past",
+        not session_expiry(
+            {
+                "refresh_token": jwt(iat=now - timedelta(days=20), exp=now - timedelta(minutes=1)),
+                "access_token": jwt(iat=now - timedelta(hours=2), exp=now + timedelta(days=8)),
+            }
+        ),
+    )
+
+    live = jwt(iat=now - timedelta(minutes=1), exp=now + timedelta(hours=1))
+    dead = jwt(iat=now - timedelta(hours=2), exp=now - timedelta(minutes=1))
+    older = jwt(iat=now - timedelta(hours=2), exp=now + timedelta(minutes=10))
+    check(
+        "fresher matching CLI token is adopted",
+        should_adopt_codex_cli(
+            {"email": "a@x.com", "access_token": live, "refresh_token": "rt-new", "account_id": "acct-1"},
+            {"email": "a@x.com", "access_token": dead, "refresh_token": "rt-old", "account_id": "acct-1"},
+            now,
+        ),
+    )
+    check(
+        "older CLI token is not adopted over a live file",
+        not should_adopt_codex_cli(
+            {"email": "a@x.com", "access_token": older, "refresh_token": "rt-old"},
+            {"email": "a@x.com", "access_token": live, "refresh_token": "rt-new"},
+            now,
+        ),
+    )
+    check(
+        "same tokens are a no-op",
+        not should_adopt_codex_cli(
+            {"email": "a@x.com", "access_token": live, "refresh_token": "rt"},
+            {"email": "a@x.com", "access_token": live, "refresh_token": "rt"},
+            now,
+        ),
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)

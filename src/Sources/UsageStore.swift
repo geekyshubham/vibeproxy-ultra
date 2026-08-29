@@ -190,17 +190,32 @@ final class UsageStore: ObservableObject {
                 .filter { account in
                     if account.isDisabled { return false }
                     if !account.isExpired { return true }
-                    // Stale cli-proxy xAI files still have a live ~/.grok session.
-                    guard type == .grok,
-                          let local = NativeUsageFetcher.readGrokAppPayload(),
-                          !NativeUsageFetcher.isGrokCredentialExpired(local)
-                    else { return false }
-                    if let accountEmail = account.email,
-                       let localEmail = local["email"] as? String
+                    // Stale cli-proxy copies still have a live native CLI session.
+                    if type == .grok,
+                       let local = NativeUsageFetcher.readGrokAppPayload(),
+                       !NativeUsageFetcher.isGrokCredentialExpired(local)
                     {
-                        return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
+                        if let accountEmail = account.email,
+                           let localEmail = local["email"] as? String
+                        {
+                            return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
+                        }
+                        return true
                     }
-                    return true
+                    if type == .codex,
+                       let local = NativeUsageFetcher.readCodexAppPayload(),
+                       let token = local["access_token"] as? String,
+                       let exp = CodexWorkspaceCredentials.accessTokenExpiry(token),
+                       exp > Date()
+                    {
+                        if let accountEmail = account.email,
+                           let localEmail = local["email"] as? String
+                        {
+                            return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
+                        }
+                        return true
+                    }
+                    return false
                 }
                 .map { (type, $0) }
         }

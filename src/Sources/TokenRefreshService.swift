@@ -65,29 +65,66 @@ enum TokenRefreshService {
 
         var jobs: [AuthRefreshJob] = []
         for file in files where file.pathExtension == "json" {
-            guard let payload = NativeUsageFetcher.readAuthPayload(at: file),
+            guard var payload = NativeUsageFetcher.readAuthPayload(at: file),
                   let type = payload["type"] as? String
             else { continue }
-            guard force || shouldRefresh(payload: payload) else { continue }
-            jobs.append(
-                AuthRefreshJob(
-                    file: file,
-                    payload: payload,
-                    type: type.lowercased(),
-                    refresh: refreshToken(from: payload)
+            let kind = type.lowercased()
+            if kind == "codex" {
+                // Adopt the live CLI/desktop session before considering a network refresh.
+                // Posting a leftover RT is `refresh_token_reused` and kills the family.
+                _ = NativeUsageFetcher.overlayCodexCLICredentialsIfFresher(onto: file)
+                payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
+            }
+            payload = flattenedAuth(payload)
+            if force || shouldRefresh(payload: payload) {
+                jobs.append(
+                    AuthRefreshJob(
+                        file: file,
+                        payload: payload,
+                        type: kind,
+                        refresh: refreshToken(from: payload)
+                    )
                 )
-            )
+            } else if kind == "codex" {
+                _ = pushCodexTokensToCLIIfFresher(payload)
+            }
         }
 
         var refreshed = 0
         for group in groupedByRefreshToken(jobs) {
             guard let first = group.first else { continue }
-            let oldRefresh = first.refresh
-            guard let updated = await refreshPayload(first.payload, type: first.type) else { continue }
+            // Re-read: Codex CLI / the Go proxy may have rotated while we scanned.
+            var livePayload = NativeUsageFetcher.readAuthPayload(at: first.file).map(flattenedAuth)
+                ?? first.payload
+            if first.type == "codex" {
+                _ = NativeUsageFetcher.overlayCodexCLICredentialsIfFresher(onto: first.file)
+                livePayload = NativeUsageFetcher.readAuthPayload(at: first.file).map(flattenedAuth)
+                    ?? livePayload
+                // Overlay wrote a newer RT onto this file — fan it out before anyone
+                // POSTs a leftover sibling copy.
+                if let old = first.refresh, !old.isEmpty,
+                   let liveRT = refreshToken(from: livePayload),
+                   liveRT != old
+                {
+                    _ = propagateRotatedTokens(
+                        oldRefresh: old,
+                        updated: livePayload,
+                        authDirectory: authDir,
+                        skipping: [first.file.path]
+                    )
+                }
+            }
+            if !force && !shouldRefresh(payload: livePayload) {
+                if first.type == "codex" { _ = pushCodexTokensToCLIIfFresher(livePayload) }
+                continue
+            }
+            let oldRefresh = refreshToken(from: livePayload) ?? first.refresh
+            guard let updated = await refreshPayload(livePayload, type: first.type) else { continue }
 
             var skipped = Set<String>()
             for job in group {
-                let merged = copyTokenFields(from: updated, onto: job.payload)
+                let current = NativeUsageFetcher.readAuthPayload(at: job.file) ?? job.payload
+                let merged = copyTokenFields(from: updated, onto: current)
                 if writeAuthFile(merged, to: job.file) {
                     refreshed += 1
                     skipped.insert(job.file.path)
@@ -113,12 +150,22 @@ enum TokenRefreshService {
         return refreshed
     }
 
-    static func refreshAccountFile(_ file: URL) async -> Bool {
-        guard let payload = NativeUsageFetcher.readAuthPayload(at: file),
+    static func refreshAccountFile(_ file: URL, force: Bool = false) async -> Bool {
+        guard var payload = NativeUsageFetcher.readAuthPayload(at: file),
               let type = payload["type"] as? String
         else { return false }
+        let kind = type.lowercased()
+        if kind == "codex" {
+            _ = NativeUsageFetcher.overlayCodexCLICredentialsIfFresher(onto: file)
+            payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
+            payload = flattenedAuth(payload)
+            if !force && !shouldRefresh(payload: payload) {
+                _ = pushCodexTokensToCLIIfFresher(payload)
+                return true
+            }
+        }
         let oldRefresh = refreshToken(from: payload)
-        guard let updated = await refreshPayload(payload, type: type.lowercased()) else { return false }
+        guard let updated = await refreshPayload(payload, type: kind) else { return false }
         let ok = writeAuthFile(updated, to: file)
         if ok {
             if let oldRefresh, !oldRefresh.isEmpty {
@@ -141,6 +188,7 @@ enum TokenRefreshService {
     /// True when the access token is near/past expiry, or when a Codex-style session is old
     /// enough that its refresh token would otherwise hit OpenAI's idle-expiry wall.
     static func shouldRefresh(payload: [String: Any]) -> Bool {
+        let payload = flattenedAuth(payload)
         guard refreshToken(from: payload) != nil else { return false }
 
         let now = Date()
@@ -252,7 +300,13 @@ enum TokenRefreshService {
         var tokens = (root["tokens"] as? [String: Any]) ?? [:]
         let stored = stringValue(tokens, keys: ["refresh_token"])
             ?? stringValue(root, keys: ["refresh_token"])
-        guard stored == oldRefresh else { return false }
+        let matchesRefresh = stored == oldRefresh
+        let matchesSeat = sameCodexSeat(root, as: updated)
+        guard matchesRefresh || matchesSeat else { return false }
+        if !matchesRefresh {
+            if seatsConflict(root, updated: updated) { return false }
+            if hasNewerAccessToken(root, than: updated) { return false }
+        }
 
         if let access = updated["access_token"] {
             tokens["access_token"] = access
@@ -354,7 +408,7 @@ enum TokenRefreshService {
         return oldExp > newExp
     }
 
-    private static func flattenedAuth(_ json: [String: Any]) -> [String: Any] {
+    static func flattenedAuth(_ json: [String: Any]) -> [String: Any] {
         var out = json
         if let tokens = json["tokens"] as? [String: Any] {
             for (key, value) in tokens where out[key] == nil {
@@ -499,7 +553,55 @@ enum TokenRefreshService {
     }
 
     private static func refreshToken(from payload: [String: Any]) -> String? {
-        stringValue(payload, keys: ["refresh_token", "refreshToken", "refresh"])
+        stringValue(flattenedAuth(payload), keys: ["refresh_token", "refreshToken", "refresh"])
+    }
+
+    /// Keep `~/.codex/auth.json` + keychain on the newest cli-proxy copy so the
+    /// official CLI cannot POST a leftover RT and revoke the family.
+    @discardableResult
+    static func pushCodexTokensToCLIIfFresher(_ payload: [String: Any]) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let url = home.appendingPathComponent(".codex/auth.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        let flat = flattenedAuth(payload)
+        guard stringValue(flat, keys: ["access_token"]) != nil else { return false }
+        if let local = NativeUsageFetcher.readCodexAppPayload(),
+           !NativeUsageFetcher.shouldAdoptCodexCLITokens(local: flat, file: local)
+        {
+            return false
+        }
+        return writeCodexCLITokens(from: flat, to: url, codexHome: home.appendingPathComponent(".codex"))
+    }
+
+    @discardableResult
+    private static func writeCodexCLITokens(
+        from updated: [String: Any],
+        to url: URL,
+        codexHome: URL
+    ) -> Bool {
+        var root = NativeUsageFetcher.readAuthPayload(at: url) ?? [:]
+        var tokens = (root["tokens"] as? [String: Any]) ?? [:]
+        if let access = stringValue(updated, keys: ["access_token"]) {
+            tokens["access_token"] = access
+            root["access_token"] = access
+        }
+        if let refresh = stringValue(updated, keys: ["refresh_token"]) {
+            tokens["refresh_token"] = refresh
+            root["refresh_token"] = refresh
+        }
+        if let idToken = stringValue(updated, keys: ["id_token"]) {
+            tokens["id_token"] = idToken
+            root["id_token"] = idToken
+        }
+        if let accountID = stringValue(updated, keys: ["account_id"]) {
+            tokens["account_id"] = accountID
+            root["account_id"] = accountID
+        }
+        root["tokens"] = tokens
+        root["last_refresh"] = isoString(Date())
+        guard writeAuthFile(root, to: url) else { return false }
+        _ = CodexWorkspaceCredentials.writeKeychain(authFileJSON: root, codexHome: codexHome)
+        return true
     }
 
     // MARK: - Provider refresh
@@ -651,6 +753,9 @@ enum TokenRefreshService {
     }
 
     private static func refreshKiro(_ payload: [String: Any]) async -> [String: Any]? {
+        if let aws = await KiroAWSAuth.refresh(payload) {
+            return aws
+        }
         guard let refresh = stringValue(payload, keys: ["refreshToken", "refresh_token"]) else {
             return nil
         }

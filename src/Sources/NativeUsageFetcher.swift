@@ -16,7 +16,12 @@ enum NativeUsageFetcher {
 
         switch serviceType {
         case .codex:
-            return await fetchCodexUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
+            return await fetchCodexUsage(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                payload: payload,
+                authFile: authFile
+            )
         case .claude:
             return await fetchClaudeUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
         case .copilot:
@@ -29,6 +34,8 @@ enum NativeUsageFetcher {
             return await fetchGrokUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
         case .kiro:
             return await fetchKiroUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
+        case .opencodeGo:
+            return await fetchOpenCodeGoUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
         case .zai:
             return await fetchZaiUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
         case .kimi:
@@ -77,6 +84,88 @@ enum NativeUsageFetcher {
     private static func fetchCodexUsage(
         authAccountID: String,
         providerID: String,
+        payload: [String: Any],
+        authFile: URL
+    ) async -> ProviderUsageSnapshot {
+        var payload = loadCodexPayload(seed: payload, authFile: authFile)
+
+        if TokenRefreshService.shouldRefresh(payload: payload) {
+            _ = await TokenRefreshService.refreshAccountFile(authFile)
+            payload = loadCodexPayload(seed: payload, authFile: authFile)
+        }
+
+        let snapshot = await fetchCodexUsageOnce(
+            authAccountID: authAccountID,
+            providerID: providerID,
+            payload: payload
+        )
+        if codexSnapshotHasLimits(snapshot) { return snapshot }
+
+        // CLI/desktop may have rotated while we used a stale cli-proxy copy.
+        let before = stringValue(payload, keys: ["access_token"])
+        payload = loadCodexPayload(seed: payload, authFile: authFile)
+        if stringValue(payload, keys: ["access_token"]) != before {
+            let retried = await fetchCodexUsageOnce(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                payload: payload
+            )
+            if codexSnapshotHasLimits(retried) { return retried }
+        }
+
+        let authRejected = (snapshot.errorMessage ?? "")
+            .localizedCaseInsensitiveContains("expired")
+            || (snapshot.errorMessage ?? "")
+                .localizedCaseInsensitiveContains("refreshing")
+        if TokenRefreshService.shouldRefresh(payload: payload)
+            || isOAuthAccessExpired(payload)
+            || authRejected
+        {
+            _ = await TokenRefreshService.refreshAccountFile(authFile, force: authRejected)
+            payload = loadCodexPayload(seed: payload, authFile: authFile)
+            return await fetchCodexUsageOnce(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                payload: payload
+            )
+        }
+
+        if snapshot.errorMessage == nil || snapshot.errorMessage?.isEmpty == true {
+            return .empty(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                accountEmail: stringValue(payload, keys: ["email"]),
+                error: sessionInvalidMessage(payload: payload)
+            )
+        }
+        return snapshot
+    }
+
+    private static func loadCodexPayload(seed: [String: Any], authFile: URL) -> [String: Any] {
+        _ = overlayCodexCLICredentialsIfFresher(onto: authFile)
+        if let latest = readAuthPayload(at: authFile) {
+            return TokenRefreshService.flattenedAuth(enrichPayload(latest, for: .codex))
+        }
+        return TokenRefreshService.flattenedAuth(enrichPayload(seed, for: .codex))
+    }
+
+    private static func codexSnapshotHasLimits(_ snapshot: ProviderUsageSnapshot) -> Bool {
+        !snapshot.windows.isEmpty || snapshot.subAccounts.contains { !$0.windows.isEmpty }
+    }
+
+    private static func isOAuthAccessExpired(_ payload: [String: Any], now: Date = Date()) -> Bool {
+        let flat = TokenRefreshService.flattenedAuth(payload)
+        if let token = stringValue(flat, keys: ["access_token", "accessToken"]),
+           let exp = CodexWorkspaceCredentials.accessTokenExpiry(token)
+        {
+            return exp <= now
+        }
+        return false
+    }
+
+    private static func fetchCodexUsageOnce(
+        authAccountID: String,
+        providerID: String,
         payload: [String: Any]
     ) async -> ProviderUsageSnapshot {
         guard let accessToken = stringValue(payload, keys: ["access_token"]) else {
@@ -92,6 +181,7 @@ enum NativeUsageFetcher {
             ?? JWTEmailExtractor.email(from: accessToken)
         let jwtPlan = chatgptPlanTypeFromJWT(accessToken)
             ?? chatgptPlanTypeFromJWT(stringValue(payload, keys: ["id_token"]))
+        var sawUnauthorized = false
 
         // Seat-scoped token lineages (Cockpit keeps one OAuth session per ChatGPT account_id).
         // A Go JWT + ChatGPT-Account-Id:team still returns Go limits — wrong token, not wrong header.
@@ -150,12 +240,14 @@ enum NativeUsageFetcher {
             let seatJWTPlan = seat.flatMap { CodexWorkspaceCredentials.chatgptPlanType(from: $0.accessToken) }
                 ?? (tokenForSeat == accessToken ? jwtPlan : nil)
 
-            if let tokenForSeat,
-               let result = await requestCodexUsagePayload(
-                accessToken: tokenForSeat,
-                chatGPTAccountID: targetID ?? seat?.accountID
-               )
-            {
+            var usageResult: CodexUsageRequestResult = .failed
+            if let tokenForSeat {
+                usageResult = await requestCodexUsagePayload(
+                    accessToken: tokenForSeat,
+                    chatGPTAccountID: targetID ?? seat?.accountID
+                )
+            }
+            if case .ok(let result) = usageResult {
                 // Reject cross-seat bleed: if we asked for team but body still says go with go windows
                 // and membership is team, keep membership plan label from accounts/check.
                 let planType = ChatGPTPlanFormatter.preferredPlanType(
@@ -201,6 +293,7 @@ enum NativeUsageFetcher {
                     )
                 }
             } else {
+                if case .unauthorized = usageResult { sawUnauthorized = true }
                 let planType = ChatGPTPlanFormatter.preferredPlanType(
                     usagePlan: nil,
                     membershipPlan: target.planType ?? seat?.planType,
@@ -219,6 +312,8 @@ enum NativeUsageFetcher {
                    jwtAccountID?.caseInsensitiveCompare(targetID) != .orderedSame
                 {
                     err = "No OAuth session for this seat — re-login with this workspace selected (or import from Cockpit)"
+                } else if sawUnauthorized {
+                    err = sessionInvalidMessage(payload: payload)
                 } else {
                     err = "Could not load limits for this subscription"
                 }
@@ -263,7 +358,9 @@ enum NativeUsageFetcher {
                 rateLimitResets: resetCredits,
                 updatedAt: Date(),
                 errorMessage: subAccounts.allSatisfy({ $0.windows.isEmpty })
-                    ? "Could not fetch Codex usage limits"
+                    ? (sawUnauthorized
+                        ? sessionInvalidMessage(payload: payload)
+                        : "Could not fetch Codex usage limits")
                     : nil,
                 isRefreshing: false
             )
@@ -287,10 +384,11 @@ enum NativeUsageFetcher {
         }
 
         // Fallback: direct usage call without memberships list.
-        if let result = await requestCodexUsagePayload(
+        let fallback = await requestCodexUsagePayload(
             accessToken: accessToken,
             chatGPTAccountID: storedAccountID
-        ), !result.windows.isEmpty {
+        )
+        if case .ok(let result) = fallback, !result.windows.isEmpty {
             let planType = ChatGPTPlanFormatter.preferredPlanType(
                 usagePlan: result.planType,
                 membershipPlan: nil,
@@ -320,6 +418,15 @@ enum NativeUsageFetcher {
                 updatedAt: Date(),
                 errorMessage: nil,
                 isRefreshing: false
+            )
+        }
+
+        if case .unauthorized = fallback {
+            return .empty(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                accountEmail: email,
+                error: sessionInvalidMessage(payload: payload)
             )
         }
 
@@ -613,33 +720,45 @@ enum NativeUsageFetcher {
         )
     }
 
+    private enum CodexUsageRequestResult {
+        case ok(CodexUsagePayload)
+        case unauthorized
+        case failed
+    }
+
     private static func requestCodexUsagePayload(
         accessToken: String,
         chatGPTAccountID: String?
-    ) async -> CodexUsagePayload? {
+    ) async -> CodexUsageRequestResult {
         let endpoints = [
             "https://chatgpt.com/backend-api/wham/usage",
             "https://chatgpt.com/backend-api/api/codex/usage",
         ]
 
+        var sawUnauthorized = false
         for endpoint in endpoints {
             guard let url = URL(string: endpoint) else { continue }
-            if let payload = await requestCodexUsagePayload(
+            switch await requestCodexUsagePayload(
                 url: url,
                 accessToken: accessToken,
                 chatGPTAccountID: chatGPTAccountID
             ) {
-                return payload
+            case .ok(let payload):
+                return .ok(payload)
+            case .unauthorized:
+                sawUnauthorized = true
+            case .failed:
+                continue
             }
         }
-        return nil
+        return sawUnauthorized ? .unauthorized : .failed
     }
 
     private static func requestCodexUsagePayload(
         url: URL,
         accessToken: String,
         chatGPTAccountID: String?
-    ) async -> CodexUsagePayload? {
+    ) async -> CodexUsageRequestResult {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 30
@@ -654,14 +773,14 @@ enum NativeUsageFetcher {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return nil }
+            guard let http = response as? HTTPURLResponse else { return .failed }
             if http.statusCode == 401 || http.statusCode == 403 {
-                return nil
+                return .unauthorized
             }
             guard (200...299).contains(http.statusCode),
                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             else {
-                return nil
+                return .failed
             }
 
             let rateLimit = json["rate_limit"] as? [String: Any]
@@ -695,13 +814,13 @@ enum NativeUsageFetcher {
                 }
             }
 
-            guard !windows.isEmpty else { return nil }
-            return CodexUsagePayload(
+            guard !windows.isEmpty else { return .failed }
+            return .ok(CodexUsagePayload(
                 windows: windows,
                 planType: stringValue(json, keys: ["plan_type"])
-            )
+            ))
         } catch {
-            return nil
+            return .failed
         }
     }
 
@@ -1646,6 +1765,144 @@ enum NativeUsageFetcher {
 
     // MARK: - Kiro
 
+    // MARK: - OpenCode Go
+
+    /// OpenCode Zen exposes the Go subscription's three quota windows at
+    /// `GET /zen/go/v1/usage` (Bearer = the provider API key). Response shape:
+    /// `{"usage":{"rolling":{...},"weekly":{...},"monthly":{...}}}` where each
+    /// entry is `{status: "ok"|"rate-limited", percent: Int, resetsAt: ISO8601}`.
+    private static func fetchOpenCodeGoUsage(
+        authAccountID: String,
+        providerID: String,
+        payload: [String: Any]
+    ) async -> ProviderUsageSnapshot {
+        guard let apiKey = stringValue(payload, keys: ["api_key", "apiKey", "key"]) else {
+            return .empty(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                error: "Missing OpenCode Go API key"
+            )
+        }
+
+        let label = stringValue(payload, keys: ["label", "email"]) ?? maskAPIKey(apiKey)
+        guard let url = URL(string: "https://opencode.ai/zen/go/v1/usage") else {
+            return .empty(authAccountID: authAccountID, providerID: providerID, accountEmail: label, error: "Invalid usage URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // opencode.ai sits behind Cloudflare and 1010-blocks default client agents.
+        request.setValue("VibeProxyUltra/1.0", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .empty(authAccountID: authAccountID, providerID: providerID, accountEmail: label, error: "No response from OpenCode Zen")
+            }
+            if http.statusCode == 401 {
+                return .empty(
+                    authAccountID: authAccountID,
+                    providerID: providerID,
+                    accountEmail: label,
+                    error: "API key rejected — replace this OpenCode Go key in Settings"
+                )
+            }
+            if http.statusCode == 403 {
+                return .empty(
+                    authAccountID: authAccountID,
+                    providerID: providerID,
+                    accountEmail: label,
+                    error: "This key has no active OpenCode Go subscription"
+                )
+            }
+            guard (200...299).contains(http.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let usage = json["usage"] as? [String: Any]
+            else {
+                return .empty(
+                    authAccountID: authAccountID,
+                    providerID: providerID,
+                    accountEmail: label,
+                    error: "Could not read OpenCode Go limits (HTTP \(http.statusCode))"
+                )
+            }
+
+            let windows = openCodeGoWindows(from: usage)
+            guard !windows.isEmpty else {
+                return .empty(
+                    authAccountID: authAccountID,
+                    providerID: providerID,
+                    accountEmail: label,
+                    error: "OpenCode Zen returned no quota windows"
+                )
+            }
+
+            return ProviderUsageSnapshot(
+                id: authAccountID,
+                providerID: providerID,
+                source: "opencode.ai/zen",
+                windows: windows,
+                accountEmail: label,
+                planType: "OpenCode Go",
+                planLabel: "OpenCode Go",
+                updatedAt: Date(),
+                errorMessage: nil,
+                isRefreshing: false
+            )
+        } catch {
+            return .empty(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                accountEmail: label,
+                error: openCodeGoNetworkError(error)
+            )
+        }
+    }
+
+    private static func openCodeGoNetworkError(_ error: Error) -> String {
+        guard let urlError = error as? URLError else {
+            return "Could not load OpenCode Go limits"
+        }
+        switch urlError.code {
+        case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed:
+            return "Network error loading OpenCode Go limits — check connectivity"
+        case .timedOut:
+            return "OpenCode Zen timed out — retry shortly"
+        case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
+            return "Could not reach opencode.ai — check network/DNS"
+        default:
+            return "Could not load OpenCode Go limits"
+        }
+    }
+
+    /// Order matters — the card shows the first window as the headline.
+    static func openCodeGoWindows(from usage: [String: Any]) -> [RateWindow] {
+        let buckets: [(key: String, label: String, minutes: Int)] = [
+            ("rolling", "5-hour", 300),
+            ("weekly", "Weekly", 10_080),
+            ("monthly", "Monthly", 43_200),
+        ]
+        return buckets.compactMap { bucket in
+            guard let entry = usage[bucket.key] as? [String: Any] else { return nil }
+            let status = (stringValue(entry, keys: ["status"]) ?? "").lowercased()
+            // A rate-limited bucket is exhausted even when `percent` lags behind.
+            let reported = doubleValue(entry, keys: ["percent"]) ?? 0
+            let usedPercent = status == "rate-limited" ? 100 : clampPercent(reported)
+            let resetsAt = parseISO8601(stringValue(entry, keys: ["resetsAt", "resets_at"]))
+            return RateWindow(
+                usedPercent: usedPercent,
+                windowMinutes: bucket.minutes,
+                resetsAt: resetsAt,
+                resetDescription: resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
+                label: bucket.label,
+                displayStyle: .percent
+            )
+        }
+    }
+
     private static func fetchKiroUsage(
         authAccountID: String,
         providerID: String,
@@ -2341,6 +2598,11 @@ enum NativeUsageFetcher {
                 for (key, value) in local where merged[key] == nil {
                     merged[key] = value
                 }
+                if shouldAdoptCodexCLITokens(local: local, file: merged) {
+                    for key in ["access_token", "refresh_token", "id_token", "account_id"] {
+                        if let value = local[key] { merged[key] = value }
+                    }
+                }
             }
         case .claude:
             if merged["access_token"] == nil, let local = readClaudeAppPayload() {
@@ -2382,22 +2644,143 @@ enum NativeUsageFetcher {
         return merged
     }
 
-    private static func readCodexAppPayload() -> [String: Any]? {
-        let authURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/auth.json")
-        guard let root = readAuthPayload(at: authURL),
-              let tokens = root["tokens"] as? [String: Any]
-        else { return nil }
+    static func readCodexAppPayload(at url: URL? = nil) -> [String: Any]? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let authURL = url ?? home.appendingPathComponent(".codex/auth.json")
+        let file = flattenCodexCLIRoot(readAuthPayload(at: authURL))
+        // Tests pass an explicit file and must not hit the real keychain.
+        let keychain: [String: Any]? = url == nil
+            ? flattenCodexCLIRoot(
+                CodexWorkspaceCredentials.readKeychain(codexHome: home.appendingPathComponent(".codex"))
+            )
+            : nil
+        return pickFresherCodexCLIPayload(file, keychain)
+    }
 
+    /// Copy a fresher Codex CLI/desktop session onto the cli-proxy file.
+    /// Imported `codex-*.json` copies go stale while `codex` rotates `~/.codex/auth.json`
+    /// + keychain; posting that leftover refresh token returns `refresh_token_reused`
+    /// and OpenAI revokes the whole family.
+    @discardableResult
+    static func overlayCodexCLICredentialsIfFresher(
+        onto authFile: URL,
+        localCodex: [String: Any]? = nil,
+        now: Date = Date()
+    ) -> Bool {
+        guard var payload = readAuthPayload(at: authFile) else { return false }
+        let local = localCodex ?? readCodexAppPayload()
+        guard let local, shouldAdoptCodexCLITokens(local: local, file: payload, now: now) else {
+            return false
+        }
+
+        payload = TokenRefreshService.flattenedAuth(payload)
+        if let access = stringValue(local, keys: ["access_token"]) {
+            payload["access_token"] = access
+        }
+        if let refresh = stringValue(local, keys: ["refresh_token"]) {
+            payload["refresh_token"] = refresh
+        }
+        if let idToken = stringValue(local, keys: ["id_token"]) {
+            payload["id_token"] = idToken
+        }
+        if let accountID = stringValue(local, keys: ["account_id"]) {
+            payload["account_id"] = accountID
+        }
+        if let exp = CodexWorkspaceCredentials.accessTokenExpiry(
+            stringValue(local, keys: ["access_token"])
+        ) {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            payload["expired"] = formatter.string(from: exp)
+            payload["expires_at"] = formatter.string(from: exp)
+        }
+        payload["last_refresh"] = payload["last_refresh"] ?? payload["expired"]
+        return writeAuthPayload(payload, to: authFile)
+    }
+
+    /// True when `local` is the same ChatGPT seat and has a newer access token than `file`.
+    static func shouldAdoptCodexCLITokens(
+        local: [String: Any],
+        file: [String: Any],
+        now: Date = Date()
+    ) -> Bool {
+        let localFlat = TokenRefreshService.flattenedAuth(local)
+        let fileFlat = TokenRefreshService.flattenedAuth(file)
+        guard let localToken = stringValue(localFlat, keys: ["access_token"]), !localToken.isEmpty else {
+            return false
+        }
+        let fileToken = stringValue(fileFlat, keys: ["access_token"])
+        if fileToken == localToken,
+           stringValue(localFlat, keys: ["refresh_token"]) == stringValue(fileFlat, keys: ["refresh_token"])
+        {
+            return false
+        }
+
+        if let fileEmail = stringValue(fileFlat, keys: ["email"]),
+           let localEmail = stringValue(localFlat, keys: ["email"]),
+           fileEmail.caseInsensitiveCompare(localEmail) != .orderedSame
+        {
+            return false
+        }
+
+        let fileAID = CodexWorkspaceCredentials.chatgptAccountID(from: fileToken)
+            ?? stringValue(fileFlat, keys: ["account_id"])
+        let localAID = CodexWorkspaceCredentials.chatgptAccountID(from: localToken)
+            ?? stringValue(localFlat, keys: ["account_id"])
+        if let fileAID, let localAID,
+           fileAID.caseInsensitiveCompare(localAID) != .orderedSame
+        {
+            return false
+        }
+
+        let localExp = CodexWorkspaceCredentials.accessTokenExpiry(localToken) ?? .distantPast
+        let fileExp = fileToken.flatMap(CodexWorkspaceCredentials.accessTokenExpiry) ?? .distantPast
+        if localExp <= fileExp { return false }
+        // A live CLI token always beats an expired/missing file token.
+        if localExp <= now, fileExp > now { return false }
+        return true
+    }
+
+    private static func flattenCodexCLIRoot(_ root: [String: Any]?) -> [String: Any]? {
+        guard let root else { return nil }
+        let tokens = (root["tokens"] as? [String: Any]) ?? [:]
         var payload: [String: Any] = [:]
-        if let value = tokens["access_token"] as? String { payload["access_token"] = value }
-        if let value = tokens["refresh_token"] as? String { payload["refresh_token"] = value }
-        if let value = tokens["id_token"] as? String { payload["id_token"] = value }
-        if let value = tokens["account_id"] as? String { payload["account_id"] = value }
-        if let email = JWTEmailExtractor.email(from: tokens["id_token"] as? String) {
+        let access = (tokens["access_token"] as? String) ?? (root["access_token"] as? String)
+        let refresh = (tokens["refresh_token"] as? String) ?? (root["refresh_token"] as? String)
+        let idToken = (tokens["id_token"] as? String) ?? (root["id_token"] as? String)
+        let accountID = (tokens["account_id"] as? String) ?? (root["account_id"] as? String)
+        if let access, !access.isEmpty { payload["access_token"] = access }
+        if let refresh, !refresh.isEmpty { payload["refresh_token"] = refresh }
+        if let idToken, !idToken.isEmpty { payload["id_token"] = idToken }
+        if let accountID, !accountID.isEmpty { payload["account_id"] = accountID }
+        if let email = root["email"] as? String, !email.isEmpty {
+            payload["email"] = email
+        } else if let email = JWTEmailExtractor.email(from: idToken) {
             payload["email"] = email
         }
         return payload.isEmpty ? nil : payload
+    }
+
+    private static func pickFresherCodexCLIPayload(
+        _ lhs: [String: Any]?,
+        _ rhs: [String: Any]?
+    ) -> [String: Any]? {
+        switch (lhs, rhs) {
+        case (nil, nil):
+            return nil
+        case (let only?, nil):
+            return only
+        case (nil, let only?):
+            return only
+        case (let a?, let b?):
+            let aExp = CodexWorkspaceCredentials.accessTokenExpiry(
+                stringValue(a, keys: ["access_token"])
+            ) ?? .distantPast
+            let bExp = CodexWorkspaceCredentials.accessTokenExpiry(
+                stringValue(b, keys: ["access_token"])
+            ) ?? .distantPast
+            return bExp > aExp ? b : a
+        }
     }
 
     static func readGrokAppPayload() -> [String: Any]? {
