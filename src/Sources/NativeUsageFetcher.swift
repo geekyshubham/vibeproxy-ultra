@@ -1920,9 +1920,17 @@ enum NativeUsageFetcher {
         // CodexBar ground truth: `kiro-cli chat --no-interactive /usage`
         // e.g. Free "(0.00 of 50 covered…)", Pro 1000, Power 10000 — never invent a pool size.
         // AWS GetUsageLimits can report ~0 while CLI shows real plan credits.
-        if let cli = await Task.detached(priority: .userInitiated, operation: {
+        let cliProbe = await Task.detached(priority: .userInitiated, operation: {
             KiroCLIUsageProbe.fetch()
-        }).value {
+        }).value
+        if cliProbe == nil {
+            NSLog("[Kiro] kiro-cli /usage probe returned nothing — falling back to GetUsageLimits")
+        }
+        if let cli = cliProbe {
+            NSLog(
+                "[Kiro] %@ → %.2f of %.0f credits (%.1f%%)",
+                cli.planName ?? "plan?", cli.creditsUsed, cli.creditsTotal, cli.creditsPercent
+            )
             let usedPercent = clampPercent(cli.creditsPercent)
             let window: RateWindow
             if cli.hasAbsoluteCredits {

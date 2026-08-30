@@ -1278,8 +1278,10 @@ struct SettingsView: View {
                     Text("30 days").tag(30)
                     Text("60 days").tag(60)
                     Text("90 days").tag(90)
+                    Text("180 days").tag(180)
+                    Text("365 days").tag(365)
                 }
-                Text("Longer refresh intervals and shorter history reduce CPU and battery use.")
+                Text("Local session logs older than this window are not counted, so a long-running plan's spend can sit outside a short history. Longer refresh intervals and shorter history reduce CPU and battery use.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

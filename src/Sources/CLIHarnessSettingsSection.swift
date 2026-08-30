@@ -76,7 +76,7 @@ struct CLIHarnessSettingsSection: View {
         } header: {
             Text("CLI tools → proxy")
         } footer: {
-            Text("Writes base URL http://127.0.0.1:\(proxyPort) into each tool’s config (backup: *.viberouter-bak). Management dashboard is separate (Open next to Management UI).")
+            Text("Writes proxy config into each tool (Claude Code: settings.viberouter.json + claude-viberouter, leaving your subscription on `claude`). Backup: *.viberouter-bak.")
                 .font(.caption2)
         }
         .onAppear {

@@ -49,6 +49,10 @@ enum LocalKiroCredits {
             }
         }
 
+        NSLog(
+            "[UsageScan] kiro: credits30d=%.2f today=%.2f models=%d",
+            historyCredits, sessionCredits, modelBuckets.count
+        )
         guard historyCredits > 0.001 || !modelBuckets.isEmpty else {
             return nil
         }

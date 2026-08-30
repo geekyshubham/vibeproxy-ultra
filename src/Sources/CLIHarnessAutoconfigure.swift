@@ -47,7 +47,7 @@ struct CLIHarness: Identifiable, Equatable {
         var notes: String {
             switch self {
             case .claudeCode:
-                return "Sets ANTHROPIC_BASE_URL in ~/.claude/settings.json"
+                return "Writes ~/.claude/settings.viberouter.json + ~/bin/claude-viberouter (keeps subscription in settings.json)"
             case .codex:
                 return "Adds a VibeRouter model_provider in ~/.codex/config.toml"
             case .openCode:
@@ -117,7 +117,7 @@ enum CLIHarnessAutoconfigure {
         switch kind {
         case .claudeCode:
             try configureClaudeCode(baseURL: base, apiKey: dummyAPIKey, proxyPort: proxyPort)
-            return "Claude Code → \(base)"
+            return "Claude Code → claude-viberouter (\(base))"
         case .codex:
             try configureCodex(baseURL: baseV1, apiKey: dummyAPIKey)
             return "Codex → \(baseV1)"
@@ -152,31 +152,90 @@ enum CLIHarnessAutoconfigure {
     // MARK: - Per-tool writers
 
     private static func configureClaudeCode(baseURL: String, apiKey: String, proxyPort: Int) throws {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.json")
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        var root = try readJSONForMerge(url)
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let claudeDir = home.appendingPathComponent(".claude")
+        try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+
+        // Never rewrite ~/.claude/settings.json — that hijacks the Anthropic
+        // OAuth subscription and can violate ToS. Proxy config lives in a sidecar
+        // file launched via `claude-viberouter`, matching the claude-kiro pattern.
+        try stripProxyEnvFromMainClaudeSettings(in: claudeDir)
+
+        let url = claudeDir.appendingPathComponent("settings.viberouter.json")
         try backupIfNeeded(url)
-        var env = root["env"] as? [String: Any] ?? [:]
-        env["ANTHROPIC_BASE_URL"] = baseURL
-        env["ANTHROPIC_API_KEY"] = apiKey
-        env["ANTHROPIC_AUTH_TOKEN"] = apiKey
-        // Only pin a model the proxy actually advertises. A stale provider-scoped
-        // ID such as "[Kiro] claude-sonnet-4-5" fails every request with
-        // "unknown provider for model", so drop it rather than leave it pinned.
-        let pinned = env["ANTHROPIC_MODEL"] as? String
-        if pinned == nil || pinned?.contains("[") == true {
-            if let resolved = resolveLiveModel(anthropicModelPreferences, port: proxyPort) {
-                env["ANTHROPIC_MODEL"] = resolved
-            } else {
-                env.removeValue(forKey: "ANTHROPIC_MODEL")
-            }
-        }
-        root["env"] = env
+        let kiroModel = resolveLiveKiroModel(port: proxyPort) ?? "kiro/claude-sonnet-4.5"
+        let root: [String: Any] = [
+            "env": [
+                "ANTHROPIC_BASE_URL": baseURL,
+                "ANTHROPIC_API_KEY": apiKey,
+                "ANTHROPIC_AUTH_TOKEN": apiKey,
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": kiroModel,
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "[VibeRouter] \(kiroModel)",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "Kiro via VibeRouter — not Anthropic Cloud",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": kiroModel,
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "[VibeRouter] \(kiroModel)",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": "Kiro via VibeRouter — not Anthropic Cloud",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kiro/claude-haiku-4.5",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "[VibeRouter] kiro/claude-haiku-4.5",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "Kiro via VibeRouter — not Anthropic Cloud",
+            ],
+            "model": kiroModel,
+        ]
         try writeJSON(root, to: url)
+        try installClaudeVibeRouterLauncher(baseURL: baseURL, apiKey: apiKey)
+    }
+
+    /// Removes proxy env keys from the main Claude Code settings so `claude`
+    /// keeps talking to api.anthropic.com with the user's subscription.
+    private static func stripProxyEnvFromMainClaudeSettings(in claudeDir: URL) throws {
+        let main = claudeDir.appendingPathComponent("settings.json")
+        guard FileManager.default.fileExists(atPath: main.path) else { return }
+        var root = try readJSONForMerge(main)
+        guard var env = root["env"] as? [String: Any] else { return }
+        let proxyKeys = [
+            "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION",
+        ]
+        for key in proxyKeys { env.removeValue(forKey: key) }
+        if env.isEmpty {
+            root.removeValue(forKey: "env")
+        } else {
+            root["env"] = env
+        }
+        try writeJSON(root, to: main)
+    }
+
+    private static func resolveLiveKiroModel(port: Int) -> String? {
+        let ids = fetchProxyModelIDs(port: port)
+        let preferences = ["kiro/claude-sonnet-4.5", "kiro/claude-sonnet-4", "kiro/auto"]
+        return resolveLiveModel(preferences, port: port, available: ids)
+    }
+
+    private static func installClaudeVibeRouterLauncher(baseURL: String, apiKey: String) throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let binDir = home.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
+        let script = binDir.appendingPathComponent("claude-viberouter")
+        let contents = """
+        #!/bin/bash
+        # Launch Claude Code via VibeRouter (Kiro, OpenCode Go, Codex, etc.).
+        # Does NOT touch your Anthropic subscription — use `claude` for that.
+        set -e
+        if ! curl -sf -o /dev/null -H "Authorization: Bearer \(apiKey)" \(baseURL)/v1/models; then
+          echo "VibeRouter is not running. Start VibeRouter.app first." >&2
+          exit 1
+        fi
+        unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+        export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+        echo "Starting Claude Code via VibeRouter (\(baseURL)). Anthropic subscription: claude"
+        exec claude --settings "$HOME/.claude/settings.viberouter.json" "$@"
+        """
+        try contents.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
     }
 
     private static func configureCodex(baseURL: String, apiKey: String) throws {
@@ -246,17 +305,23 @@ enum CLIHarnessAutoconfigure {
         var provider = root["provider"] as? [String: Any] ?? [:]
 
         // Fetch live model ids when proxy is up; fall back to common aliases.
-        let modelIDs = fetchProxyModelIDs(port: proxyPort)
-        var models: [String: Any] = [:]
-        for id in modelIDs.prefix(40) {
-            models[openCodeModelKey(id)] = [
-                "name": id,
-                "tool_call": true,
-            ] as [String: Any]
+        // The whole catalog is published: truncating it is what hides models
+        // like gpt-5.6-* and claude-opus-5 from the OpenCode picker.
+        var modelIDs = fetchProxyModelIDs(port: proxyPort)
+        if modelIDs.isEmpty {
+            modelIDs = Array(anthropicModelPreferences.prefix(1) + openAIModelPreferences.prefix(1))
         }
-        if models.isEmpty {
-            for id in anthropicModelPreferences.prefix(1) + openAIModelPreferences.prefix(1) {
-                models[openCodeModelKey(id)] = ["name": id, "tool_call": true] as [String: Any]
+        var models: [String: Any] = [:]
+        for id in modelIDs {
+            models[openCodeModelKey(id)] = openCodeModelEntry(id: id, displayName: id)
+            // Reasoning budget is expressed as a model suffix the proxy strips
+            // before forwarding, so each effort level needs its own entry.
+            for effort in thinkingEfforts(for: id) {
+                let variant = "\(id)-thinking-\(effort.budget)"
+                models[openCodeModelKey(variant)] = openCodeModelEntry(
+                    id: variant,
+                    displayName: "\(id) (\(effort.label) reasoning)"
+                )
             }
         }
 
@@ -274,6 +339,15 @@ enum CLIHarnessAutoconfigure {
             "models": models,
         ] as [String: Any]
         root["provider"] = provider
+
+        // OpenCode treats enabled_providers as a whitelist when it is present,
+        // so a provider missing from it is written but never offered.
+        if var enabled = root["enabled_providers"] as? [String] {
+            enabled.removeAll { $0 == legacyProviderKey }
+            if !enabled.contains(providerKey) { enabled.append(providerKey) }
+            root["enabled_providers"] = enabled
+        }
+
         if root["model"] == nil {
             let preferred = resolveLiveModel(anthropicModelPreferences, port: proxyPort, available: modelIDs)
                 ?? models.keys.sorted().first
@@ -374,7 +448,7 @@ enum CLIHarnessAutoconfigure {
         let home = FileManager.default.homeDirectoryForCurrentUser
         switch kind {
         case .claudeCode:
-            return home.appendingPathComponent(".claude/settings.json")
+            return home.appendingPathComponent(".claude/settings.viberouter.json")
         case .codex:
             return home.appendingPathComponent(".codex/config.toml")
         case .openCode:
@@ -465,6 +539,42 @@ enum CLIHarnessAutoconfigure {
         let ids = available ?? fetchProxyModelIDs(port: port)
         guard !ids.isEmpty else { return nil }
         return preferences.first(where: ids.contains)
+    }
+
+    struct ThinkingEffort {
+        let label: String
+        let budget: Int
+    }
+
+    /// ThinkingProxy caps a budget at 31,999, so "high" sits at the ceiling.
+    static let thinkingEffortLevels = [
+        ThinkingEffort(label: "low", budget: 4_000),
+        ThinkingEffort(label: "medium", budget: 16_000),
+        ThinkingEffort(label: "high", budget: 31_999),
+    ]
+
+    /// Only Claude Opus/Sonnet accept a thinking budget, and only the plain IDs —
+    /// an already-suffixed or image/agent alias must not be expanded.
+    static func thinkingEfforts(for id: String) -> [ThinkingEffort] {
+        guard id.hasPrefix("claude-"), !id.contains("-thinking") else { return [] }
+        guard id.contains("opus") || id.contains("sonnet") else { return [] }
+        return thinkingEffortLevels
+    }
+
+    static func isReasoningModel(_ id: String) -> Bool {
+        if id.contains("-thinking") { return true }
+        if id.hasPrefix("claude-") { return id.contains("opus") || id.contains("sonnet") }
+        if id.hasPrefix("gpt-5") { return true }
+        if id.hasPrefix("grok-") { return !id.contains("non-reasoning") }
+        return false
+    }
+
+    /// Context/output limits are deliberately omitted: nothing in the proxy or
+    /// its catalog reports them, and a guessed window would silently truncate.
+    static func openCodeModelEntry(id: String, displayName: String) -> [String: Any] {
+        var entry: [String: Any] = ["name": displayName, "tool_call": true]
+        if isReasoningModel(id) { entry["reasoning"] = true }
+        return entry
     }
 
     /// OpenCode model keys cannot carry spaces or brackets.
